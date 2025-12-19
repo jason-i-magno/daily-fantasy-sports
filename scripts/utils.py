@@ -16,6 +16,15 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     "salary": ("salary", "Salary", "SALARY"),
     "proj_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
     "proj_fpts": ("projected_fpts", "FPTS"),
+    "position": (
+        "position",
+        "positions",
+        "pos",
+        "Pos",
+        "POS",
+        "ROSTER POSITION",
+        "Roster Position",
+    ),
 }
 
 
