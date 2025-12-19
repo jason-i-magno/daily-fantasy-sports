@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set
 
 import pandas as pd
 import pulp
@@ -19,6 +19,21 @@ from utils import coerce_numeric, normalize_columns, print_table
 # ----------------------------
 # Helpers
 # ----------------------------
+
+
+def format_lineup(df, assignments):
+    rows = []
+    for i, s in assignments:
+        rows.append(
+            {
+                "slot": SLOTS[s]["name"],
+                "player_name": df.loc[i, "player_name"],
+                "position": df.loc[i, "position"],
+                "salary": df.loc[i, "salary"],
+                "proj_minutes": df.loc[i, "proj_minutes"],
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def parse_positions(raw: str) -> Set[str]:
@@ -59,33 +74,26 @@ SLOTS: List[Dict] = [
 ]
 
 
-def is_eligible(player_positions: Set[str], slot_allowed: Optional[Set[str]]) -> bool:
-    if slot_allowed is None:
-        return True
-    return bool(player_positions & slot_allowed)
-
-
-def solve_max_minutes_with_slots(df: pd.DataFrame, cap: float) -> pd.DataFrame:
-    # Build ILP with assignment variables y[i,s]
-    prob = pulp.LpProblem("dk_max_minutes_with_slot_assignment", pulp.LpMaximize)
+def build_ilp_with_slots(df: pd.DataFrame, cap: float):
+    prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
     n_players = len(df)
     n_slots = len(SLOTS)
 
-    # y[(i,s)] = 1 if player i assigned to slot s
-    y: Dict[Tuple[int, int], pulp.LpVariable] = {}
-    for i in range(n_players):
-        for s in range(n_slots):
-            y[(i, s)] = pulp.LpVariable(f"y_{i}_{s}", cat="Binary")
+    y = {
+        (i, s): pulp.LpVariable(f"y_{i}_{s}", cat="Binary")
+        for i in range(n_players)
+        for s in range(n_slots)
+    }
 
-    # Objective: maximize total projected minutes of chosen assignments
+    # Objective
     prob += pulp.lpSum(
         df.loc[i, "proj_minutes"] * y[(i, s)]
         for i in range(n_players)
         for s in range(n_slots)
     )
 
-    # Salary cap: each chosen player counts once (via slot assignment)
+    # Salary cap
     prob += (
         pulp.lpSum(
             df.loc[i, "salary"] * y[(i, s)]
@@ -95,63 +103,84 @@ def solve_max_minutes_with_slots(df: pd.DataFrame, cap: float) -> pd.DataFrame:
         <= cap
     )
 
-    # Each slot filled by exactly one player
+    # Each slot filled once
     for s in range(n_slots):
         prob += pulp.lpSum(y[(i, s)] for i in range(n_players)) == 1
 
-    # Each player used at most once across all slots
+    # Each player used at most once
     for i in range(n_players):
         prob += pulp.lpSum(y[(i, s)] for s in range(n_slots)) <= 1
 
-    # Eligibility constraints: disallow assigning player i to slot s if not eligible
+    # Eligibility constraints
     for i in range(n_players):
         ppos = df.loc[i, "positions"]
         for s in range(n_slots):
             allowed = SLOTS[s]["allowed"]
-            if not is_eligible(ppos, allowed):
+            if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
 
-    # Solve
-    status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
-    if status != pulp.LpStatusOptimal:
-        raise RuntimeError(
-            f"No optimal solution found (status={pulp.LpStatus[status]})"
-        )
+    return prob, y
 
-    # Extract lineup (one row per slot)
+
+def extract_lineup(df: pd.DataFrame, y) -> pd.DataFrame:
     rows = []
-    for s in range(n_slots):
-        chosen_i = None
-        for i in range(n_players):
-            if y[(i, s)].value() == 1:
-                chosen_i = i
-                break
-        if chosen_i is None:
-            raise RuntimeError(
-                f"Slot {SLOTS[s]['name']} not assigned in solution (unexpected)."
+    for (i, s), var in y.items():
+        if var.value() == 1:
+            rows.append(
+                {
+                    "slot": SLOTS[s]["name"],
+                    "player_name": df.loc[i, "player_name"],
+                    "position": df.loc[i, "position"],
+                    "salary": df.loc[i, "salary"],
+                    "proj_minutes": df.loc[i, "proj_minutes"],
+                    "player_index": i,
+                    "slot_index": s,
+                }
             )
 
-        rows.append(
+    if len(rows) != len(SLOTS):
+        raise RuntimeError("Invalid solution extracted")
+
+    return pd.DataFrame(rows)
+
+
+def is_eligible(player_positions: Set[str], slot_allowed: Optional[Set[str]]) -> bool:
+    if slot_allowed is None:
+        return True
+    return bool(player_positions & slot_allowed)
+
+
+def solve_top_k_lineups(df: pd.DataFrame, cap: float, k: int = 10):
+    prob, y = build_ilp_with_slots(df, cap)
+
+    lineups = []
+    chosen_players = set()
+
+    for n in range(k):
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        if status != pulp.LpStatusOptimal:
+            break
+
+        lineup_df = extract_lineup(df, y)
+        total_minutes = lineup_df["proj_minutes"].sum()
+
+        lineups.append(
             {
-                "slot": SLOTS[s]["name"],
-                "player_name": df.loc[chosen_i, "player_name"],
-                "position": df.loc[chosen_i, "position"],
-                "salary": float(df.loc[chosen_i, "salary"]),
-                "proj_minutes": float(df.loc[chosen_i, "proj_minutes"]),
+                "rank": n + 1,
+                "total_minutes": total_minutes,
+                "lineup": lineup_df.copy(),
             }
         )
 
-    lineup = pd.DataFrame(rows)
-    # Optional: stable presentation order by slot list
-    lineup["slot_order"] = lineup["slot"].map(
-        {SLOTS[i]["name"]: i for i in range(n_slots)}
-    )
-    lineup = (
-        lineup.sort_values("slot_order")
-        .drop(columns=["slot_order"])
-        .reset_index(drop=True)
-    )
-    return lineup
+        # Exclude this exact lineup (player-slot assignments)
+        chosen_players = set(lineup_df["player_index"])
+
+        prob += (
+            pulp.lpSum(y[(i, s)] for i in chosen_players for s in range(len(SLOTS)))
+            <= len(chosen_players) - 1
+        )
+
+    return lineups
 
 
 # ----------------------------
@@ -190,11 +219,11 @@ def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
     df = load_players(args.input)
-    lineup = solve_max_minutes_with_slots(df, cap=args.cap)
-    print(lineup)
-    print_lineup(lineup)
+    lineups = solve_top_k_lineups(df, cap=args.cap, k=10)
+    for lineup in lineups:
+        print_lineup(lineup["lineup"])
 
-    lineup.to_csv(args.output, index=False)
+    # lineup.to_csv(args.output, index=False)
     return 0
 
 
