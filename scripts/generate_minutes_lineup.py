@@ -46,14 +46,15 @@ def load_players(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
 
     df = normalize_columns(
-        df, required=["player_name", "salary", "proj_minutes", "position"]
+        df, required=["player_name", "salary", "proj_minutes", "proj_fpts", "position"]
     )
-    df = df[["player_name", "salary", "proj_minutes", "position"]].copy()
+    df = df[["player_name", "salary", "proj_minutes", "proj_fpts", "position"]].copy()
     df["salary"] = coerce_numeric(df["salary"])
     df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
+    df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
     df["positions"] = df["position"].map(parse_positions)
 
-    df = df.dropna(subset=["player_name", "salary", "proj_minutes"])
+    df = df.dropna(subset=["player_name", "salary", "proj_minutes", "proj_fpts"])
     df = df[df["positions"].map(bool)]
 
     return df.reset_index(drop=True)
@@ -118,6 +119,11 @@ def build_ilp_with_slots(df: pd.DataFrame, cap: float):
             allowed = SLOTS[s]["allowed"]
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
+
+    # Force top projected scorer into the lineup
+    top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(2).index.tolist()
+    for top_fpts_id in top_fpts_ids:
+        prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
 
     return prob, y
 
@@ -223,7 +229,7 @@ def main(argv: Iterable[str]) -> int:
     for lineup in lineups:
         print_lineup(lineup["lineup"])
 
-    # lineup.to_csv(args.output, index=False)
+        # lineup["lineup"].to_csv(args.output, index=False)
     return 0
 
 
