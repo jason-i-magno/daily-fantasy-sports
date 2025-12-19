@@ -10,55 +10,29 @@ from __future__ import annotations
 
 import argparse
 import sys
-import unicodedata
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Iterable
 
 import pandas as pd
 
-# Canonical column names and common aliases found in provider exports.
-COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "player_name": ("player_name", "player", "name", "PLAYER", "DKName"),
-    "projected_points": ("projected_points", "proj", "Proj", "FPTS", "PTS"),
-    "projected_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
-}
-
-
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns to canonical names using aliases; fail if a required column is missing."""
-    df = df.copy()
-    renamed = {}
-    for canonical, aliases in COLUMN_ALIASES.items():
-        if canonical in df.columns:
-            renamed[canonical] = canonical
-            continue
-        match = next((col for col in df.columns if col in aliases), None)
-        if match:
-            renamed[match] = canonical
-        else:
-            missing = ", ".join([canonical] + list(aliases))
-            raise ValueError(f"Missing required column; expected one of: {missing}")
-    return df.rename(columns=renamed)
-
-
-def normalize_name(name: str) -> str:
-    """Lowercase, strip, remove punctuation/spacing accents for simple matching."""
-    if not isinstance(name, str):
-        return ""
-    normalized = unicodedata.normalize("NFKD", name)
-    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    normalized = normalized.lower()
-    cleaned = "".join(ch for ch in normalized if ch.isalnum())
-    return cleaned.strip()
+from utils import (
+    coerce_numeric,
+    ensure_output_path,
+    normalize_columns,
+    normalize_name,
+    print_table,
+)
 
 
 def load_projection(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df = normalize_columns(df)
+    df = normalize_columns(
+        df, required=["player_name", "projected_points", "projected_minutes"]
+    )
     df = df[["player_name", "projected_points", "projected_minutes"]].copy()
     df["player_key"] = df["player_name"].map(normalize_name)
-    df["projected_points"] = pd.to_numeric(df["projected_points"], errors="coerce")
-    df["projected_minutes"] = pd.to_numeric(df["projected_minutes"], errors="coerce")
+    df["projected_points"] = coerce_numeric(df["projected_points"])
+    df["projected_minutes"] = coerce_numeric(df["projected_minutes"])
     return df.dropna(subset=["player_key"])
 
 
@@ -75,7 +49,7 @@ def merge_and_diff(etr: pd.DataFrame, rg: pd.DataFrame) -> pd.DataFrame:
     return merged.sort_values("abs_diff", ascending=False)
 
 
-def print_table(df: pd.DataFrame, limit: int = 20) -> None:
+def print_preview(df: pd.DataFrame, limit: int = 20) -> None:
     cols = [
         "player_name_etr",
         "player_name_rg",
@@ -86,11 +60,12 @@ def print_table(df: pd.DataFrame, limit: int = 20) -> None:
         "projected_minutes_rg",
         "minutes_diff",
     ]
-    preview = df.head(limit)[cols] if not df.empty else df
-    if preview.empty:
-        print("No overlapping players after normalization.")
-    else:
-        print(preview.to_string(index=False))
+    print_table(
+        df,
+        cols=cols,
+        limit=limit,
+        empty_msg="No overlapping players after normalization.",
+    )
 
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
@@ -127,10 +102,9 @@ def main(argv: Iterable[str]) -> int:
     if args.min_diff > 0:
         merged = merged[merged["abs_diff"] >= args.min_diff]
 
-    print_table(merged, limit=args.preview_rows)
+    print_preview(merged, limit=args.preview_rows)
 
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = ensure_output_path(args.output)
     merged.to_csv(output_path, index=False)
     return 0
 
