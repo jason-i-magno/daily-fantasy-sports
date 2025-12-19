@@ -2,7 +2,7 @@
 """
 Compare projections from two sources and highlight meaningful disagreements.
 
-Inputs: two CSVs with player_name, projected_points, projected_minutes (common aliases supported).
+Inputs: two CSVs with player_name, projected_fpts, projected_minutes (common aliases supported).
 Output: merged table with both projections, differences, sorted by absolute point difference.
 """
 
@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-
 from utils import (
     coerce_numeric,
     ensure_output_path,
@@ -26,13 +24,12 @@ from utils import (
 
 def load_projection(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df = normalize_columns(
-        df, required=["player_name", "projected_points", "projected_minutes"]
-    )
-    df = df[["player_name", "projected_points", "projected_minutes"]].copy()
+    df = normalize_columns(df, required=["player_name", "proj_fpts", "proj_minutes"])
+    df = df[["player_name", "proj_fpts", "proj_minutes"]].copy()
     df["player_key"] = df["player_name"].map(normalize_name)
-    df["projected_points"] = coerce_numeric(df["projected_points"])
-    df["projected_minutes"] = coerce_numeric(df["projected_minutes"])
+    df.drop("player_name", axis=1, inplace=True)
+    df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
+    df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
     return df.dropna(subset=["player_key"])
 
 
@@ -43,21 +40,31 @@ def merge_and_diff(etr: pd.DataFrame, rg: pd.DataFrame) -> pd.DataFrame:
         how="inner",
         suffixes=("_etr", "_rg"),
     )
-    merged["points_diff"] = merged["projected_points_etr"] - merged["projected_points_rg"]
-    merged["abs_diff"] = merged["points_diff"].abs()
-    merged["minutes_diff"] = merged["projected_minutes_etr"] - merged["projected_minutes_rg"]
+    merged["fpts_diff"] = merged["proj_fpts_etr"] - merged["proj_fpts_rg"]
+    merged["minutes_diff"] = merged["proj_minutes_etr"] - merged["proj_minutes_rg"]
+    merged["abs_diff"] = merged["minutes_diff"].abs()
+    new_order = [
+        "player_key",
+        "proj_minutes_etr",
+        "proj_minutes_rg",
+        "minutes_diff",
+        "abs_diff",
+        "proj_fpts_etr",
+        "proj_fpts_rg",
+        "fpts_diff",
+    ]
+    merged = merged[new_order]
     return merged.sort_values("abs_diff", ascending=False)
 
 
 def print_preview(df: pd.DataFrame, limit: int = 20) -> None:
     cols = [
-        "player_name_etr",
-        "player_name_rg",
-        "projected_points_etr",
-        "projected_points_rg",
-        "points_diff",
-        "projected_minutes_etr",
-        "projected_minutes_rg",
+        "player_key",
+        "proj_fpts_etr",
+        "proj_fpts_rg",
+        "fpts_diff",
+        "proj_minutes_etr",
+        "proj_minutes_rg",
         "minutes_diff",
     ]
     print_table(
@@ -71,7 +78,9 @@ def print_preview(df: pd.DataFrame, limit: int = 20) -> None:
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--etr", required=True, help="Path to ETR projections CSV.")
-    parser.add_argument("--rg", required=True, help="Path to RotoGrinders projections CSV.")
+    parser.add_argument(
+        "--rg", required=True, help="Path to RotoGrinders projections CSV."
+    )
     parser.add_argument(
         "--output",
         default="data/processed/projection_differences.csv",

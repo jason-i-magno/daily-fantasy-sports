@@ -14,12 +14,14 @@ import pandas as pd
 COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     "player_name": ("player_name", "player", "name", "PLAYER", "DKName"),
     "salary": ("salary", "Salary", "SALARY"),
-    "projected_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
-    "projected_points": ("projected_points", "proj", "Proj", "FPTS", "PTS"),
+    "proj_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
+    "proj_fpts": ("projected_fpts", "FPTS"),
 }
 
 
-def normalize_columns(df: pd.DataFrame, required: Iterable[str] | None = None) -> pd.DataFrame:
+def normalize_columns(
+    df: pd.DataFrame, required: Iterable[str] | None = None
+) -> pd.DataFrame:
     """Rename columns to canonical names using aliases; optionally enforce required columns."""
     df = df.copy()
     renamed = {}
@@ -62,7 +64,12 @@ def ensure_output_path(path_str: str) -> Path:
     return path
 
 
-def print_table(df: pd.DataFrame, cols: Iterable[str], empty_msg: str = "No rows to display.", limit: int | None = None) -> None:
+def print_table(
+    df: pd.DataFrame,
+    cols: Iterable[str],
+    empty_msg: str = "No rows to display.",
+    limit: int | None = None,
+) -> None:
     if df.empty:
         print(empty_msg)
         return
