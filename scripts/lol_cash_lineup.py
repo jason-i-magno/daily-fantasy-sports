@@ -6,21 +6,25 @@ Inputs:
   - Salary CSV from DraftKings.
   - JSON file with team win probabilities, e.g. {"TES": 0.7, "JDG": 0.62}.
 
+Team priority (hard):
+  - Team A: highest win%.
+  - Team B: second-highest win%.
+  - TEAM slot must be Team A.
+  - >=3 players from Team A; prefer 4–3 stack with A(4)+B(3) when feasible; Team B is the only secondary stack.
+
 Hard constraints:
   - Salary cap: 50,000 (CPT costs 1.5x salary).
   - Roster: CPT, TOP, JNG, MID, ADC, SUP, TEAM.
-  - Captain must be ADC or MID on a team with win% >= 0.65.
-  - Only consider teams with win% >= 0.60; at least one team in lineup has win% >= 0.65.
-  - Enforce a 4–3 stack (primary stack of 4 incl. TEAM slot; secondary stack of 3); TEAM slot uses the primary stack.
-  - No underdog stacks; at least two teams per lineup.
-  - No one-off TOP or SUP (satisfied by 4–3); one-off JNG/MID/ADC only from favored teams (all candidates are favored).
+  - CPT priority ADC > MID > JNG (JNG only if ADC/MID CPT infeasible with Team A); CPT must be from Team A or Team B; CPT cannot be TOP/SUP.
+  - Enforce 4–3 stack when feasible; Team A is the primary (4, incl. TEAM); Team B is the only secondary stack (3).
+  - No underdog primary stacks; no one-off SUP/TOP; JNG/MID/ADC one-offs only from Team A or Team B.
 
 Heuristic objective (cash safety):
   - Maximize combined team win probability weight across roster.
   - Secondary: maximize salary used (target high spend, >= 49k), small penalty for unused cap.
 
 Implementation notes:
-  - Uses PuLP ILP; enumerates ordered team pairs to satisfy 4–3 stacks.
+  - Uses PuLP ILP; prioritizes A(4)+B(3) stack and captain role order.
   - Produces top N unique valid lineups (deduped by player+cpt/team composition) sorted by objective.
   - Rejects invalid or duplicate lineups; no randomness, no upside simulation.
 """
@@ -32,7 +36,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
 import pulp
@@ -52,40 +56,47 @@ class Player:
 
 def load_salaries(path: str, win_probs: Dict[str, float]) -> List[Player]:
     df = pd.read_csv(path)
-    # DraftKings columns: Position, Name, Salary, TeamAbbrev, etc.
     for required in ["Name", "Roster Position", "Salary", "TeamAbbrev"]:
         if required not in df.columns:
             raise ValueError(f"Missing required column: {required}")
 
     df["Salary"] = coerce_numeric(df["Salary"])
     df["team_prob"] = df["TeamAbbrev"].map(win_probs)
-    # Only teams with win% >= 0.60 are eligible.
     df = df[df["team_prob"] >= 0.60]
 
     players: List[Player] = []
     for _, row in df.iterrows():
         role = str(row["Roster Position"]).upper()
+        if role == "CPT":
+            continue  # use base salary rows; CPT handled by 1.5x multiplier
         team = str(row["TeamAbbrev"])
-        player = Player(
-            name=str(row["Name"]),
-            team=team,
-            role=role,
-            salary=float(row["Salary"]),
-            is_team=role == "TEAM",
+        players.append(
+            Player(
+                name=str(row["Name"]),
+                team=team,
+                role=role,
+                salary=float(row["Salary"]),
+                is_team=role == "TEAM",
+            )
         )
-        players.append(player)
     return players
+
+
+def top_two_teams(win_probs: Dict[str, float]) -> Tuple[str, str]:
+    ranked = sorted(win_probs.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ranked) < 2:
+        raise ValueError("Need at least two teams with win probabilities.")
+    return ranked[0][0], ranked[1][0]
 
 
 def build_problem(
     players: List[Player],
-    team_primary: str,
-    team_secondary: str,
+    team_a: str,
+    team_b: str,
     win_probs: Dict[str, float],
+    captain_roles_allowed: Sequence[str],
 ):
     roles = ["TOP", "JNG", "MID", "ADC", "SUP"]
-    team_prob_primary = win_probs.get(team_primary, 0.0)
-    team_prob_secondary = win_probs.get(team_secondary, 0.0)
 
     prob = pulp.LpProblem("lol_cash_lineup", pulp.LpMaximize)
 
@@ -93,7 +104,11 @@ def build_problem(
     cpt_vars: Dict[str, pulp.LpVariable] = {}
     team_vars: Dict[str, pulp.LpVariable] = {}
 
+    allowed_teams = {team_a, team_b}
+
     for idx, p in enumerate(players):
+        if p.team not in allowed_teams:
+            continue
         pid = f"p{idx}"
         if p.is_team:
             team_vars[pid] = pulp.LpVariable(
@@ -103,7 +118,7 @@ def build_problem(
             flex_vars[pid] = pulp.LpVariable(
                 pid + "_flex", lowBound=0, upBound=1, cat="Binary"
             )
-            if p.role in {"ADC", "MID", "JNG"} and win_probs.get(p.team, 0.0) >= 0.65:
+            if p.role in captain_roles_allowed:
                 cpt_vars[pid] = pulp.LpVariable(
                     pid + "_cpt", lowBound=0, upBound=1, cat="Binary"
                 )
@@ -125,29 +140,18 @@ def build_problem(
             f"one_{role}",
         )
 
-    # TEAM slot: exactly one, must be the primary stack.
+    # TEAM slot: exactly one, must be Team A.
     prob += pulp.lpSum(team_vars.values()) == 1, "one_team_slot"
     prob += (
         (
             pulp.lpSum(
                 v
                 for pid, v in team_vars.items()
-                if players[int(pid[1:])].team == team_primary
+                if players[int(pid[1:])].team == team_a
             )
             == 1
         ),
-        "team_matches_primary",
-    )
-    prob += (
-        (
-            pulp.lpSum(
-                v
-                for pid, v in team_vars.items()
-                if players[int(pid[1:])].team != team_primary
-            )
-            == 0
-        ),
-        "team_not_secondary",
+        "team_matches_A",
     )
 
     # No player as both flex and CPT.
@@ -165,7 +169,7 @@ def build_problem(
     )
     prob += salary_expr <= SALARY_CAP, "salary_cap"
 
-    # Team stack counts: 4 for primary (including TEAM), 3 for secondary; no other teams.
+    # Team stack counts: enforce A(4) + B(3) (includes TEAM).
     def team_count(team: str):
         return (
             pulp.lpSum(
@@ -179,31 +183,8 @@ def build_problem(
             )
         )
 
-    prob += team_count(team_primary) == 4, "primary_stack_4"
-    prob += team_count(team_secondary) == 3, "secondary_stack_3"
-    allowed_teams = {team_primary, team_secondary}
-    for pid, v in flex_vars.items():
-        if players[int(pid[1:])].team not in allowed_teams:
-            prob += v == 0
-    for pid, v in cpt_vars.items():
-        if players[int(pid[1:])].team not in allowed_teams:
-            prob += v == 0
-    for pid, v in team_vars.items():
-        if players[int(pid[1:])].team not in allowed_teams:
-            prob += v == 0
-
-    # Captain team win prob >= 0.65 enforced via variable availability; add explicit link.
-    captain_team_prob = pulp.lpSum(
-        win_probs.get(players[int(pid[1:])].team, 0.0) * v
-        for pid, v in cpt_vars.items()
-    )
-    prob += captain_team_prob >= 0.65, "captain_team_prob_floor"
-
-    # At least one team in lineup has >=0.65 win% (true if either team meets it; pre-filtered outside).
-    prob += (
-        int(team_prob_primary >= 0.65 or team_prob_secondary >= 0.65) == 1,
-        "high_prob_team_present",
-    )
+    prob += team_count(team_a) == 4, "team_a_count"
+    prob += team_count(team_b) == 3, "team_b_count"
 
     # Objective: favor total win prob and high salary usage; small penalty on unused cap.
     total_win = (
@@ -276,7 +257,6 @@ def extract_lineup(
 
 
 def lineup_signature(rows: List[dict]) -> str:
-    # Signature to dedupe: sorted by slot+player name+team.
     parts = [
         f"{r['slot']}|{r['player_name']}|{r['team']}"
         for r in sorted(rows, key=lambda x: x["slot"])
@@ -286,51 +266,64 @@ def lineup_signature(rows: List[dict]) -> str:
 
 def solve_for_pair(
     players: List[Player],
-    team_primary: str,
-    team_secondary: str,
+    team_a: str,
+    team_b: str,
     win_probs: Dict[str, float],
     limit: int,
 ):
     lineups = []
-    prob, flex_vars, cpt_vars, team_vars = build_problem(
-        players, team_primary, team_secondary, win_probs
-    )
+    captain_priority = [
+        ["ADC"],
+        ["ADC", "MID"],
+        ["ADC", "MID", "JNG"],
+    ]
 
-    seen_constraints = []
-    while len(lineups) < limit:
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
-        if pulp.LpStatus[status] != "Optimal":
-            break
-        rows = extract_lineup(flex_vars, cpt_vars, team_vars, players)
-        if len(rows) != 7:
-            break  # incomplete or invalid
-        sig = lineup_signature(rows)
-        if sig in {l["signature"] for l in lineups}:
-            break
-        salary_used = sum(r["salary"] for r in rows)
-        total_win_prob = sum(win_probs.get(r["team"], 0.0) for r in rows)
-        lineups.append(
-            {
-                "rows": rows,
-                "signature": sig,
-                "salary_used": salary_used,
-                "total_win_prob": total_win_prob,
-                "objective": pulp.value(prob.objective),
-            }
+    seen_sigs = set()
+    for roles_allowed in captain_priority:
+        prob, flex_vars, cpt_vars, team_vars = build_problem(
+            players, team_a, team_b, win_probs, captain_roles_allowed=roles_allowed
         )
-        # Exclude this exact lineup for next iteration.
-        selected_vars = []
-        for pid, var in flex_vars.items():
-            if var.value() == 1:
-                selected_vars.append(var)
-        for pid, var in cpt_vars.items():
-            if var.value() == 1:
-                selected_vars.append(var)
-        for pid, var in team_vars.items():
-            if var.value() == 1:
-                selected_vars.append(var)
-        prob += pulp.lpSum(selected_vars) <= len(selected_vars) - 1
-        seen_constraints.append(selected_vars)
+
+        found_this_level = False
+        while len(lineups) < limit:
+            status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+            if pulp.LpStatus[status] != "Optimal":
+                break
+            rows = extract_lineup(flex_vars, cpt_vars, team_vars, players)
+            if len(rows) != 7:
+                break
+            sig = lineup_signature(rows)
+            if sig in seen_sigs:
+                break
+            salary_used = sum(r["salary"] for r in rows)
+            total_win_prob = sum(win_probs.get(r["team"], 0.0) for r in rows)
+            lineups.append(
+                {
+                    "rows": rows,
+                    "signature": sig,
+                    "salary_used": salary_used,
+                    "total_win_prob": total_win_prob,
+                    "objective": pulp.value(prob.objective),
+                }
+            )
+            seen_sigs.add(sig)
+            found_this_level = True
+
+            # Exclude this exact lineup for next iteration.
+            selected_vars = []
+            for pid, var in flex_vars.items():
+                if var.value() == 1:
+                    selected_vars.append(var)
+            for pid, var in cpt_vars.items():
+                if var.value() == 1:
+                    selected_vars.append(var)
+            for pid, var in team_vars.items():
+                if var.value() == 1:
+                    selected_vars.append(var)
+            prob += pulp.lpSum(selected_vars) <= len(selected_vars) - 1
+
+        if found_this_level:
+            break  # Respect captain priority; only fall through if infeasible.
     return lineups
 
 
@@ -394,13 +387,13 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--top-n",
         type=int,
         default=10,
-        help="Number of unique lineups to return (across all team pairings).",
+        help="Number of unique lineups to return.",
     )
     parser.add_argument(
         "--per-pair",
         type=int,
-        default=3,
-        help="Max number of lineups to extract per team pairing.",
+        default=5,
+        help="Max number of lineups to extract (respecting captain priority).",
     )
     parser.add_argument(
         "--output",
@@ -416,33 +409,24 @@ def main(argv: Iterable[str]) -> int:
     with open(args.win_probs, "r", encoding="utf-8") as f:
         win_probs = json.load(f)
 
+    try:
+        team_a, team_b = top_two_teams(win_probs)
+    except ValueError as exc:
+        print(exc)
+        return 1
+
     players = load_salaries(args.salaries, win_probs)
     if not players:
         print("No eligible players after filtering for win probabilities >= 0.60.")
         return 1
 
-    teams = sorted({p.team for p in players if win_probs.get(p.team, 0.0) >= 0.60})
-    if len(teams) < 2:
-        print("Need at least two favored teams (win% >= 0.60) to build lineups.")
-        return 1
+    lineups = solve_for_pair(players, team_a, team_b, win_probs, limit=args.per_pair)
 
-    all_lineups: List[dict] = []
-    for primary in teams:
-        for secondary in teams:
-            if primary == secondary:
-                continue
-            if max(win_probs.get(primary, 0.0), win_probs.get(secondary, 0.0)) < 0.65:
-                continue  # at least one team >= 0.65
-            pair_lineups = solve_for_pair(
-                players, primary, secondary, win_probs, limit=args.per_pair
-            )
-            all_lineups.extend(pair_lineups)
-
-    if not all_lineups:
+    if not lineups:
         print("No valid lineups found under the given constraints.")
         return 1
 
-    ranked = rank_lineups(all_lineups)
+    ranked = rank_lineups(lineups)
     print_lineups(ranked, limit=args.top_n)
     save_lineups(ranked, path=args.output, limit=args.top_n)
     return 0
