@@ -25,6 +25,7 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "ROSTER POSITION",
         "Roster Position",
     ),
+    "ceiling": ("ceiling", "Ceiling", "CEILING", "ceil", "Ceil", "CEIL"),
 }
 
 

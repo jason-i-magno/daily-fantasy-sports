@@ -46,15 +46,28 @@ def load_players(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
 
     df = normalize_columns(
-        df, required=["player_name", "salary", "proj_minutes", "proj_fpts", "position"]
+        df,
+        required=[
+            "player_name",
+            "salary",
+            "proj_minutes",
+            "proj_fpts",
+            "position",
+            "ceiling",
+        ],
     )
-    df = df[["player_name", "salary", "proj_minutes", "proj_fpts", "position"]].copy()
+    df = df[
+        ["player_name", "salary", "proj_minutes", "proj_fpts", "position", "ceiling"]
+    ].copy()
     df["salary"] = coerce_numeric(df["salary"])
     df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
     df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
     df["positions"] = df["position"].map(parse_positions)
+    df["ceiling"] = coerce_numeric(df["ceiling"])
 
-    df = df.dropna(subset=["player_name", "salary", "proj_minutes", "proj_fpts"])
+    df = df.dropna(
+        subset=["player_name", "salary", "proj_minutes", "proj_fpts", "ceiling"]
+    )
     df = df[df["positions"].map(bool)]
 
     return df.reset_index(drop=True)
@@ -120,8 +133,8 @@ def build_ilp_with_slots(df: pd.DataFrame, cap: float):
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
 
-    # Force top projected scorer into the lineup
-    top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(2).index.tolist()
+    # Force top projected scorer(s) into the lineup
+    top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
     for top_fpts_id in top_fpts_ids:
         prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
 
@@ -139,6 +152,8 @@ def extract_lineup(df: pd.DataFrame, y) -> pd.DataFrame:
                     "position": df.loc[i, "position"],
                     "salary": df.loc[i, "salary"],
                     "proj_minutes": df.loc[i, "proj_minutes"],
+                    "proj_fpts": df.loc[i, "proj_fpts"],
+                    "ceiling": df.loc[i, "ceiling"],
                     "player_index": i,
                     "slot_index": s,
                 }
@@ -209,12 +224,22 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 def print_lineup(df: pd.DataFrame) -> None:
     print_table(
         df,
-        cols=["slot", "player_name", "position", "salary", "proj_minutes"],
+        cols=[
+            "slot",
+            "player_name",
+            "position",
+            "salary",
+            "proj_minutes",
+            "proj_fpts",
+            "ceiling",
+        ],
         empty_msg="No valid lineup found under the given cap and slot constraints.",
     )
     totals = {
         "total_salary": df["salary"].sum(),
         "total_proj_minutes": df["proj_minutes"].sum(),
+        "total_proj_fpts": df["proj_fpts"].sum(),
+        "total_ceiling": df["ceiling"].sum(),
     }
     print("\nTotals:")
     for k, v in totals.items():
