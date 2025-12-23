@@ -15,7 +15,7 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
     "player_name": ("player_name", "player", "name", "PLAYER", "DKName"),
     "salary": ("salary", "Salary", "SALARY"),
     "proj_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
-    "proj_fpts": ("projected_fpts", "FPTS"),
+    "proj_fpts": ("projected_fpts", "FPTS", "fpts"),
     "position": (
         "position",
         "positions",
