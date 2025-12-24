@@ -9,8 +9,10 @@ This is a diagnostic / baseline tool, NOT a fantasy-point optimizer.
 from __future__ import annotations
 
 import argparse
+import io
+import math
 import sys
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Set
 
 import pandas as pd
 import pulp
@@ -21,28 +23,29 @@ from utils import coerce_numeric, normalize_columns, print_table
 # ----------------------------
 
 
-def format_lineup(df, assignments):
-    rows = []
-    for i, s in assignments:
-        rows.append(
-            {
-                "slot": SLOTS[s]["name"],
-                "player_name": df.loc[i, "player_name"],
-                "position": df.loc[i, "position"],
-                "salary": df.loc[i, "salary"],
-                "proj_minutes": df.loc[i, "proj_minutes"],
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def parse_positions(raw: str) -> Set[str]:
-    if not isinstance(raw, str):
-        return set()
-    return {p.strip().upper() for p in raw.split("/") if p.strip()}
-
-
-def load_players(path: str) -> pd.DataFrame:
+def load_players(path: str) -> tuple[pd.DataFrame, int, list[str]]:
+    cols = []
+    if "rotogrinders" in path:
+        cols = [
+            "player_name",
+            "salary",
+            "proj_minutes",
+            "proj_fpts",
+            "position",
+            "ceiling",
+            "floor",
+            "team",
+        ]
+    elif "etr" in path:
+        cols = [
+            "player_name",
+            "salary",
+            "proj_minutes",
+            "proj_fpts",
+            "position",
+            "ceiling",
+            "team",
+        ]
     df = pd.read_csv(path)
 
     df = normalize_columns(
@@ -53,24 +56,73 @@ def load_players(path: str) -> pd.DataFrame:
             "proj_minutes",
             "proj_fpts",
             "position",
-            "ceiling",
+            "team",
         ],
     )
-    df = df[
-        ["player_name", "salary", "proj_minutes", "proj_fpts", "position", "ceiling"]
-    ].copy()
+    df = df[cols].copy()
     df["salary"] = coerce_numeric(df["salary"])
     df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
     df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
     df["positions"] = df["position"].map(parse_positions)
     df["ceiling"] = coerce_numeric(df["ceiling"])
 
-    df = df.dropna(
-        subset=["player_name", "salary", "proj_minutes", "proj_fpts", "ceiling"]
-    )
+    if "rotogrinders" in path:
+        df["floor"] = coerce_numeric(df["floor"])
+
+    df = df.dropna(subset=cols)
     df = df[df["positions"].map(bool)]
 
-    return df.reset_index(drop=True)
+    def infer_slate_games(frame: pd.DataFrame) -> int:
+        # Infer slate size from unique teams (approx games = teams/2). Fallback to 8 if missing.
+        teams = set(frame["team"].dropna().unique())
+
+        if len(teams) % 2 != 0:
+            raise ValueError("Number of teams must be even.")
+
+        return len(teams) / 2
+
+    slate_games = infer_slate_games(df)
+
+    return df.reset_index(drop=True), slate_games, cols
+
+
+def parse_positions(raw: str) -> Set[str]:
+    if not isinstance(raw, str):
+        return set()
+    return {p.strip().upper() for p in raw.split("/") if p.strip()}
+
+
+def print_lineup(df: pd.DataFrame, cols: list[str]) -> None:
+    print_table(
+        df,
+        cols=["slot"] + cols,
+        empty_msg="No valid lineup found under the given cap and slot constraints.",
+    )
+    totals = {
+        "total_salary": df["salary"].sum(),
+        "total_proj_minutes": df["proj_minutes"].sum(),
+        "total_proj_fpts": df["proj_fpts"].sum(),
+        "total_ceiling": df["ceiling"].sum(),
+    } | {"total_floor": df["floor"].sum() if "floor" in cols else 0.0}
+    print("\nTotals:")
+    for k, v in totals.items():
+        print(f"  {k}: {v:.2f}")
+
+
+def write_lineup(
+    lineup: pd.DataFrame, cols: list[str], out_file: io.TextIOWrapper
+) -> None:
+    out_file.write(str(lineup[["slot"] + cols]))
+    totals = {
+        "total_salary": lineup["salary"].sum(),
+        "total_proj_minutes": lineup["proj_minutes"].sum(),
+        "total_proj_fpts": lineup["proj_fpts"].sum(),
+        "total_ceiling": lineup["ceiling"].sum(),
+    } | {"total_floor": lineup["floor"].sum() if "floor" in cols else 0.0}
+
+    out_file.write("\nTotals:")
+    for k, v in totals.items():
+        out_file.write(f"  {k}: {v:.2f}\n")
 
 
 # ----------------------------
@@ -88,7 +140,11 @@ SLOTS: List[Dict] = [
 ]
 
 
-def build_ilp_with_slots(df: pd.DataFrame, cap: float):
+def build_ilp_with_slots(
+    df: pd.DataFrame,
+    cap: float,
+    maximize_fpts: bool = False,
+):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
     n_players = len(df)
@@ -101,11 +157,21 @@ def build_ilp_with_slots(df: pd.DataFrame, cap: float):
     }
 
     # Objective
-    prob += pulp.lpSum(
-        df.loc[i, "proj_minutes"] * y[(i, s)]
-        for i in range(n_players)
-        for s in range(n_slots)
-    )
+    if maximize_fpts:
+        # Maximize fpts
+        prob += pulp.lpSum(
+            df.loc[i, "proj_fpts"] * y[(i, s)]
+            for i in range(n_players)
+            for s in range(n_slots)
+        )
+
+    else:
+        # Maximize minutes
+        prob += pulp.lpSum(
+            df.loc[i, "proj_minutes"] * y[(i, s)]
+            for i in range(n_players)
+            for s in range(n_slots)
+        )
 
     # Salary cap
     prob += (
@@ -134,29 +200,21 @@ def build_ilp_with_slots(df: pd.DataFrame, cap: float):
                 prob += y[(i, s)] == 0
 
     # Force top projected scorer(s) into the lineup
-    top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
-    for top_fpts_id in top_fpts_ids:
-        prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
+    # top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
+    # for top_fpts_id in top_fpts_ids:
+    #     prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
 
     return prob, y
 
 
-def extract_lineup(df: pd.DataFrame, y) -> pd.DataFrame:
+def extract_lineup(df: pd.DataFrame, y, cols: list[str]) -> pd.DataFrame:
     rows = []
     for (i, s), var in y.items():
         if var.value() == 1:
             rows.append(
-                {
-                    "slot": SLOTS[s]["name"],
-                    "player_name": df.loc[i, "player_name"],
-                    "position": df.loc[i, "position"],
-                    "salary": df.loc[i, "salary"],
-                    "proj_minutes": df.loc[i, "proj_minutes"],
-                    "proj_fpts": df.loc[i, "proj_fpts"],
-                    "ceiling": df.loc[i, "ceiling"],
-                    "player_index": i,
-                    "slot_index": s,
-                }
+                {"slot": SLOTS[s]["name"]}
+                | {col: df.loc[i, col] for col in cols}
+                | {"player_index": i, "slot_index": s}
             )
 
     if len(rows) != len(SLOTS):
@@ -165,14 +223,14 @@ def extract_lineup(df: pd.DataFrame, y) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def is_eligible(player_positions: Set[str], slot_allowed: Optional[Set[str]]) -> bool:
-    if slot_allowed is None:
-        return True
-    return bool(player_positions & slot_allowed)
-
-
-def solve_top_k_lineups(df: pd.DataFrame, cap: float, k: int = 10):
-    prob, y = build_ilp_with_slots(df, cap)
+def solve_top_k_lineups(
+    df: pd.DataFrame,
+    cap: float,
+    cols: list[str],
+    k: int = 10,
+    maximize_fpts: bool = False,
+):
+    prob, y = build_ilp_with_slots(df, cap, maximize_fpts=maximize_fpts)
 
     lineups = []
     chosen_players = set()
@@ -182,7 +240,7 @@ def solve_top_k_lineups(df: pd.DataFrame, cap: float, k: int = 10):
         if status != pulp.LpStatusOptimal:
             break
 
-        lineup_df = extract_lineup(df, y)
+        lineup_df = extract_lineup(df, y, cols)
         total_minutes = lineup_df["proj_minutes"].sum()
 
         lineups.append(
@@ -193,7 +251,7 @@ def solve_top_k_lineups(df: pd.DataFrame, cap: float, k: int = 10):
             }
         )
 
-        # Exclude this exact lineup (player-slot assignments)
+        # Exclude this player set (DFS-unique lineup)
         chosen_players = set(lineup_df["player_index"])
 
         prob += (
@@ -214,6 +272,14 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Path to DK salary CSV")
     parser.add_argument("--cap", type=float, required=True, help="Salary cap")
     parser.add_argument(
+        "-k", "--k-lineups", type=int, default=1, help="Number of lineups to generate"
+    )
+    parser.add_argument(
+        "--maximize-fpts",
+        action="store_true",
+        help="Set lineup generation objective to maximize FPTS",
+    )
+    parser.add_argument(
         "--output",
         default="data/processed/dk_max_minutes_lineup.csv",
         help="Output CSV path",
@@ -221,40 +287,120 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def print_lineup(df: pd.DataFrame) -> None:
-    print_table(
-        df,
-        cols=[
-            "slot",
-            "player_name",
-            "position",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "ceiling",
-        ],
-        empty_msg="No valid lineup found under the given cap and slot constraints.",
-    )
-    totals = {
-        "total_salary": df["salary"].sum(),
-        "total_proj_minutes": df["proj_minutes"].sum(),
-        "total_proj_fpts": df["proj_fpts"].sum(),
-        "total_ceiling": df["ceiling"].sum(),
-    }
-    print("\nTotals:")
-    for k, v in totals.items():
-        print(f"  {k}: {v:.2f}")
-
-
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
-    df = load_players(args.input)
-    lineups = solve_top_k_lineups(df, cap=args.cap, k=10)
-    for lineup in lineups:
-        print_lineup(lineup["lineup"])
+    df, slate_games, cols = load_players(args.input)
 
-        # lineup["lineup"].to_csv(args.output, index=False)
+    # Generate maximum minutes lineup
+    prob, y = build_ilp_with_slots(df, args.cap, maximize_fpts=False)
+    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+
+    max_minutes_lineup = extract_lineup(df, y, cols)
+
+    # Generate maximum minutes lineup
+    prob, y = build_ilp_with_slots(df, args.cap, maximize_fpts=True)
+    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+
+    max_fpts_lineup = extract_lineup(df, y, cols)
+
+    # Generate top k lineups
+    top_k_lineups = []
+    if args.k_lineups > 1:
+        # Disallow any player under minutes floor.
+        df = df[df["proj_minutes"] >= 22].reset_index(drop=True)
+
+        top_k_lineups = solve_top_k_lineups(
+            df,
+            cap=args.cap,
+            cols=cols,
+            k=args.k_lineups,
+            maximize_fpts=True if args.maximize_fpts else False,
+        )
+
+        # Soft, slate-aware fragility penalty for ranking only (does not change feasibility).
+        def alpha_from_slate(games: int) -> float:
+            if games >= 10:
+                return 1.0
+            if games >= 7:
+                return 0.7
+            if games >= 5:
+                return 0.4
+            return 0.2
+
+        # Soft, fixed, slate-independent minutes deficit penalty for ranking only (does not change feasibility).
+        beta = 0.05
+
+        # Slate-aware minutes floor
+        def minutes_floor_from_slate(games: int) -> float:
+            if games >= 10:
+                return 258.0
+            if games >= 7:
+                return 255.0
+            if games >= 5:
+                return 250.0
+            return 245.0
+
+        def total_fragile_minutes(lineup_df: pd.DataFrame) -> float:
+            return float(sum(max(0, 30 - m) for m in lineup_df["proj_minutes"]))
+
+        alpha = alpha_from_slate(slate_games)
+        minutes_floor = minutes_floor_from_slate(slate_games)
+        for lu in top_k_lineups:
+            tfm = total_fragile_minutes(lu["lineup"])
+            lu["total_fragile_minutes"] = tfm
+            # Adjusted score penalizes fragile minutes; acts as a tie-breaker favoring safer minutes on larger slates.
+            lu["adjusted_score"] = (
+                lu["lineup"]["proj_fpts"].sum()
+                - alpha * math.sqrt(tfm)
+                - beta * max(0, minutes_floor - lu["lineup"]["proj_minutes"].sum())
+            )
+
+        top_k_lineups = sorted(
+            top_k_lineups, key=lambda x: x["adjusted_score"], reverse=True
+        )
+
+    max_fpts = 0
+    max_minutes = 0
+    max_ceil = 0
+    max_floor = 0
+
+    with open(args.output, "w") as out_file:
+        # Print max minute lineup info to stdout
+        print("\nMax Minutes Lineup")
+        print_lineup(max_minutes_lineup, cols)
+
+        # Write max minute lineup info to output file
+        out_file.write("\nMax Minutes Lineup")
+        write_lineup(max_minutes_lineup, cols, out_file)
+
+        # Print max fpts lineup info to stdout
+        print("\nMax FPTS Lineup")
+        print_lineup(max_fpts_lineup, cols)
+
+        # Write max fpts lineup info to output file
+        out_file.write("\nMax FPTS Lineup")
+        write_lineup(max_fpts_lineup, cols, out_file)
+
+        # Print top k lineups to stdout and write them to the output file
+        for i, lineup in enumerate(top_k_lineups):
+            print(f"\nLineup #{i}")
+            print_lineup(lineup["lineup"], cols)
+
+            out_file.write(f"\nLineup #{i}")
+            write_lineup(lineup["lineup"], cols, out_file)
+
+            max_fpts = max(max_fpts, lineup["lineup"]["proj_fpts"].sum())
+            max_minutes = max(max_minutes, lineup["lineup"]["proj_minutes"].sum())
+            max_ceil = max(max_ceil, lineup["lineup"]["ceiling"].sum())
+
+            if "floor" in cols:
+                max_floor = max(max_floor, lineup["lineup"]["floor"].sum())
+
+    print(f"{max_fpts=}")
+    print(f"{max_minutes=}")
+    print(f"{max_ceil=}")
+    print(f"{max_floor=}")
     return 0
 
 
