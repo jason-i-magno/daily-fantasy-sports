@@ -14,23 +14,10 @@ from typing import Iterable
 
 import pandas as pd
 from utils import (
-    coerce_numeric,
     ensure_output_path,
-    normalize_columns,
-    normalize_name,
+    load_projection_csv,
     print_table,
 )
-
-
-def load_projection(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df = normalize_columns(df, required=["player_name", "proj_fpts", "proj_minutes"])
-    df = df[["player_name", "proj_fpts", "proj_minutes"]].copy()
-    df["player_key"] = df["player_name"].map(normalize_name)
-    df.drop("player_name", axis=1, inplace=True)
-    df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
-    df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
-    return df.dropna(subset=["player_key"])
 
 
 def merge_and_diff(etr: pd.DataFrame, rg: pd.DataFrame) -> pd.DataFrame:
@@ -104,8 +91,8 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
-    etr_df = load_projection(args.etr)
-    rg_df = load_projection(args.rg)
+    etr_df, _, _ = load_projection_csv(args.etr)
+    rg_df, _, _ = load_projection_csv(args.rg)
 
     merged = merge_and_diff(etr_df, rg_df)
     if args.min_diff > 0:
