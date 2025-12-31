@@ -10,86 +10,45 @@ from __future__ import annotations
 
 import argparse
 import io
-import math
+import json
 import sys
-from typing import Dict, Iterable, List, Set
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List
 
 import pandas as pd
 import pulp
-from utils import coerce_numeric, normalize_columns, print_table
+from utils import (
+    ResultsFileMeta,
+    adjusted_score,
+    load_projection_csv,
+    parse_filename,
+    print_table,
+    total_fragile_minutes,
+)
 
 # ----------------------------
 # Helpers
 # ----------------------------
 
 
-def load_players(path: str) -> tuple[pd.DataFrame, int, list[str]]:
-    cols = []
-    if "rotogrinders" in path:
-        cols = [
-            "player_name",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "position",
-            "ceiling",
-            "floor",
-            "team",
-        ]
-    elif "etr" in path:
-        cols = [
-            "player_name",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "position",
-            "ceiling",
-            "team",
-        ]
-    df = pd.read_csv(path)
-
-    df = normalize_columns(
-        df,
-        required=[
-            "player_name",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "position",
-            "team",
-        ],
-    )
-    df = df[cols].copy()
-    df["salary"] = coerce_numeric(df["salary"])
-    df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
-    df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
-    df["positions"] = df["position"].map(parse_positions)
-    df["ceiling"] = coerce_numeric(df["ceiling"])
-
-    if "rotogrinders" in path:
-        df["floor"] = coerce_numeric(df["floor"])
-
-    df = df.dropna(subset=cols)
-    df = df[df["positions"].map(bool)]
-
-    def infer_slate_games(frame: pd.DataFrame) -> int:
-        # Infer slate size from unique teams (approx games = teams/2). Fallback to 8 if missing.
-        teams = set(frame["team"].dropna().unique())
-
-        if len(teams) % 2 != 0:
-            raise ValueError("Number of teams must be even.")
-
-        return len(teams) / 2
-
-    slate_games = infer_slate_games(df)
-
-    return df.reset_index(drop=True), slate_games, cols
+def build_player_index_map(
+    df: pd.DataFrame, id_col: str = "player_name"
+) -> dict[str, int]:
+    return {name: idx for idx, name in enumerate(df[id_col])}
 
 
-def parse_positions(raw: str) -> Set[str]:
-    if not isinstance(raw, str):
-        return set()
-    return {p.strip().upper() for p in raw.split("/") if p.strip()}
+def lineup_df_to_indices(
+    lineup_df: pd.DataFrame,
+    player_index_map: dict[str, int],
+    id_col: str = "player_name",
+) -> list[int]:
+    indices = []
+    for name in lineup_df[id_col]:
+        if name not in player_index_map:
+            raise KeyError(f"Player {name} not found in projection file")
+        indices.append(player_index_map[name])
+    return indices
 
 
 def print_lineup(df: pd.DataFrame, cols: list[str]) -> None:
@@ -123,6 +82,35 @@ def write_lineup(
     out_file.write("\nTotals:")
     for k, v in totals.items():
         out_file.write(f"  {k}: {v:.2f}\n")
+
+
+def write_lineups_to_file(
+    out_dir: str,
+    meta: ResultsFileMeta,
+    slate_size: int,
+    top_fpts_indices: list[list[int]],
+    top_minutes_indices: list[list[int]],
+):
+    payload = {
+        "slate_id": meta.slate_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "projection_source": meta.source,
+        "slate_size (games)": slate_size,
+        "top_fpts": top_fpts_indices,
+        "top_minutes": top_minutes_indices,
+    }
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    file_path = (
+        out_path
+        / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+    )
+    with open(file_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+    return file_path
 
 
 # ----------------------------
@@ -289,76 +277,76 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
+    meta = parse_filename(Path(args.input).stem)
 
-    df, slate_games, cols = load_players(args.input)
+    df, slate_games, cols = load_projection_csv(args.input)
+    player_index_map = build_player_index_map(df)
 
-    # Generate maximum minutes lineup
-    prob, y = build_ilp_with_slots(df, args.cap, maximize_fpts=False)
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    # Generate top k maximum minutes lineups
+    max_minutes_lineups = solve_top_k_lineups(
+        df,
+        cap=args.cap,
+        cols=cols,
+        k=args.k_lineups,
+        maximize_fpts=False,
+    )
 
-    max_minutes_lineup = extract_lineup(df, y, cols)
+    # Generate top k maximum FPTs lineus
+    max_fpts_lineups = solve_top_k_lineups(
+        df,
+        cap=args.cap,
+        cols=cols,
+        k=args.k_lineups,
+        maximize_fpts=True,
+    )
 
-    # Generate maximum minutes lineup
-    prob, y = build_ilp_with_slots(df, args.cap, maximize_fpts=True)
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    # Generate top k adjusted lineups
+    # Disallow any player under minutes floor.
+    df = df[df["proj_minutes"] >= 22].reset_index(drop=True)
 
-    max_fpts_lineup = extract_lineup(df, y, cols)
+    adjusted_lineups = solve_top_k_lineups(
+        df,
+        cap=args.cap,
+        cols=cols,
+        k=args.k_lineups,
+        maximize_fpts=True if args.maximize_fpts else False,
+    )
 
-    # Generate top k lineups
-    top_k_lineups = []
-    if args.k_lineups > 1:
-        # Disallow any player under minutes floor.
-        df = df[df["proj_minutes"] >= 22].reset_index(drop=True)
-
-        top_k_lineups = solve_top_k_lineups(
-            df,
-            cap=args.cap,
-            cols=cols,
-            k=args.k_lineups,
-            maximize_fpts=True if args.maximize_fpts else False,
+    for lu in adjusted_lineups:
+        tfm = total_fragile_minutes(lu["lineup"])
+        lu["total_fragile_minutes"] = tfm
+        # Adjusted score penalizes fragile minutes; acts as a tie-breaker favoring safer minutes on larger slates.
+        lu["adjusted_score"] = adjusted_score(
+            lu["lineup"]["proj_fpts"].sum(),
+            lu["lineup"]["proj_minutes"].sum(),
+            tfm,
+            slate_games,
         )
 
-        # Soft, slate-aware fragility penalty for ranking only (does not change feasibility).
-        def alpha_from_slate(games: int) -> float:
-            if games >= 10:
-                return 1.0
-            if games >= 7:
-                return 0.7
-            if games >= 5:
-                return 0.4
-            return 0.2
+    adjusted_lineups = sorted(
+        adjusted_lineups, key=lambda x: x["adjusted_score"], reverse=True
+    )
 
-        # Soft, fixed, slate-independent minutes deficit penalty for ranking only (does not change feasibility).
-        beta = 0.05
+    top_fpts_indices = [
+        lineup_df_to_indices(lu["lineup"], player_index_map) for lu in max_fpts_lineups
+    ]
 
-        # Slate-aware minutes floor
-        def minutes_floor_from_slate(games: int) -> float:
-            if games >= 10:
-                return 258.0
-            if games >= 7:
-                return 255.0
-            if games >= 5:
-                return 250.0
-            return 245.0
+    top_minutes_indices = [
+        lineup_df_to_indices(lu["lineup"], player_index_map)
+        for lu in max_minutes_lineups
+    ]
 
-        def total_fragile_minutes(lineup_df: pd.DataFrame) -> float:
-            return float(sum(max(0, 30 - m) for m in lineup_df["proj_minutes"]))
+    assert all(len(lu) == 8 for lu in top_fpts_indices)
+    assert all(len(lu) == 8 for lu in top_minutes_indices)
+    assert len(set(tuple(lu) for lu in top_fpts_indices)) == len(top_fpts_indices)
 
-        alpha = alpha_from_slate(slate_games)
-        minutes_floor = minutes_floor_from_slate(slate_games)
-        for lu in top_k_lineups:
-            tfm = total_fragile_minutes(lu["lineup"])
-            lu["total_fragile_minutes"] = tfm
-            # Adjusted score penalizes fragile minutes; acts as a tie-breaker favoring safer minutes on larger slates.
-            lu["adjusted_score"] = (
-                lu["lineup"]["proj_fpts"].sum()
-                - alpha * math.sqrt(tfm)
-                - beta * max(0, minutes_floor - lu["lineup"]["proj_minutes"].sum())
-            )
-
-        top_k_lineups = sorted(
-            top_k_lineups, key=lambda x: x["adjusted_score"], reverse=True
-        )
+    write_lineups_to_file(
+        out_dir="data/candidate_lineups/",
+        meta=meta,
+        slate_size=slate_games,
+        top_fpts_indices=top_fpts_indices,
+        top_minutes_indices=top_minutes_indices,
+    )
 
     max_fpts = 0
     max_minutes = 0
@@ -368,22 +356,22 @@ def main(argv: Iterable[str]) -> int:
     with open(args.output, "w") as out_file:
         # Print max minute lineup info to stdout
         print("\nMax Minutes Lineup")
-        print_lineup(max_minutes_lineup, cols)
+        print_lineup(max_minutes_lineups[0]["lineup"], cols)
 
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup")
-        write_lineup(max_minutes_lineup, cols, out_file)
+        write_lineup(max_minutes_lineups[0]["lineup"], cols, out_file)
 
         # Print max fpts lineup info to stdout
         print("\nMax FPTS Lineup")
-        print_lineup(max_fpts_lineup, cols)
+        print_lineup(max_fpts_lineups[0]["lineup"], cols)
 
         # Write max fpts lineup info to output file
         out_file.write("\nMax FPTS Lineup")
-        write_lineup(max_fpts_lineup, cols, out_file)
+        write_lineup(max_fpts_lineups[0]["lineup"], cols, out_file)
 
         # Print top k lineups to stdout and write them to the output file
-        for i, lineup in enumerate(top_k_lineups):
+        for i, lineup in enumerate(adjusted_lineups):
             print(f"\nLineup #{i}")
             print_lineup(lineup["lineup"], cols)
 
@@ -401,6 +389,7 @@ def main(argv: Iterable[str]) -> int:
     print(f"{max_minutes=}")
     print(f"{max_ceil=}")
     print(f"{max_floor=}")
+
     return 0
 
 

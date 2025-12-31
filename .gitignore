@@ -1,6 +1,7 @@
 # Data directories
-data/raw/
+data/candidate_lineups/
 data/processed/
+data/raw/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
