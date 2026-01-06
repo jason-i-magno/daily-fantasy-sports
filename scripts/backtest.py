@@ -17,7 +17,7 @@ import dataclasses
 import json
 import logging
 from pathlib import Path
-from typing import Iterable, List
+from typing import List, Set
 
 import pandas as pd
 from utils import (
@@ -72,10 +72,22 @@ def join_proj_results(
     )
     missing_actuals = merged[merged["_merge"] == "left_only"][id_col].tolist()
     if missing_actuals:
-        logger.warning("Missing actuals for players: %s", missing_actuals)
+        logger.debug("Missing actuals for players: %s", missing_actuals)
     merged = merged.drop(columns=["_merge"])
     merged["FPTS"] = merged["FPTS"].fillna(0.0)
     return merged
+
+
+def load_h2h_results(path: str) -> dict:
+    with open(path, "r") as f:
+        payload = json.load(f)
+
+    required = {"fee_1", "fee_2", "fee_3"}
+    missing = required - payload.keys()
+    if missing:
+        raise ValueError(f"Candidate lineup file missing keys: {missing}")
+
+    return payload
 
 
 def load_candidate_lineups(path: str) -> dict:
@@ -105,23 +117,33 @@ def load_results_csv(path: str) -> pd.DataFrame:
     return df
 
 
-def lineup_from_indices(
-    df: pd.DataFrame, indices: Iterable[int], id_col: str
+def lineup_from_player_keys(
+    df: pd.DataFrame, player_keys: Set[str], id_col: str
 ) -> Lineup:
-    sub = df.loc[list(indices)]
-    players = frozenset(sub[id_col].tolist())
-    projected_fpts = float(sub["proj_fpts"].sum())
-    projected_minutes = float(sub["proj_minutes"].sum())
-    rg_floor = float(sub["floor"].sum())
-    fragile_count = int((sub["proj_minutes"] < 28).sum())
-    actual_fpts = float(sub["FPTS"].sum())
+    player_keys = set(player_keys)
+    df = df.copy()
+    df[id_col] = df[id_col].map(normalize_name)
+
+    lineup_df = df[df[id_col].isin(player_keys)]
+
+    missing = player_keys - set(lineup_df[id_col])
+    if missing:
+        df.to_csv("test.csv")
+        raise ValueError(f"Players not found: {missing}")
+
+    players = frozenset(lineup_df[id_col].tolist())
+    projected_fpts = float(lineup_df["proj_fpts"].sum())
+    projected_minutes = float(lineup_df["proj_minutes"].sum())
+    rg_floor = float(lineup_df["floor"].sum())
+    fragile_count = int((lineup_df["proj_minutes"] < 30).sum())
+    actual_fpts = float(lineup_df["FPTS"].sum())
     return Lineup(
         players=players,
         projected_fpts=projected_fpts,
         projected_minutes=projected_minutes,
         rg_floor=rg_floor,
         fragile_count=fragile_count,
-        total_fragile_minutes=total_fragile_minutes(sub),
+        total_fragile_minutes=total_fragile_minutes(lineup_df),
         actual_fpts=actual_fpts,
     )
 
@@ -149,6 +171,9 @@ def evaluate_lineups(
     top_fpts_lineups: List[Lineup],
     top_minutes_lineups: List[Lineup],
     baseline_proj: Lineup,
+    h2h_lineup_1: Lineup,
+    h2h_lineup_2: Lineup,
+    h2h_lineup_3: Lineup,
 ) -> List[SlateResult]:
     results: List[SlateResult] = []
 
@@ -355,6 +380,117 @@ def evaluate_lineups(
         )
     )
 
+    # Opponent H2H $1
+    win_vs_proj = 0.0
+    is_mirror = h2h_lineup_1.players == baseline_proj.players
+
+    if is_mirror:
+        win_vs_proj = 0.5  # tie
+    elif h2h_lineup_1.actual_fpts > baseline_proj.actual_fpts:
+        win_vs_proj = 1.0  # win
+    elif h2h_lineup_1.actual_fpts < baseline_proj.actual_fpts:
+        win_vs_proj = 0.0  # loss
+    else:
+        win_vs_proj = 0.5  # tie (rare with different lineups)
+
+    win_vs_top_10_median = 0.0
+
+    if h2h_lineup_1.actual_fpts > top_10_median_actual:
+        win_vs_top_10_median = 1.0  # win
+    elif h2h_lineup_1.actual_fpts < top_10_median_actual:
+        win_vs_top_10_median = 0.0  # loss
+    else:
+        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
+
+    results.append(
+        SlateResult(
+            slate_id=slate_id,
+            slate_games=slate_games,
+            strategy="Opponent H2H $1",
+            my_actual=h2h_lineup_1.actual_fpts,
+            baseline_proj=baseline_proj.actual_fpts,
+            win_vs_proj=win_vs_proj,
+            margin_vs_proj=h2h_lineup_1.actual_fpts - baseline_proj.actual_fpts,
+            is_mirror=is_mirror,
+            win_vs_top_10_median=win_vs_top_10_median,
+            margin_vs_top_10_median=h2h_lineup_1.actual_fpts - top_10_median_actual,
+        )
+    )
+
+    # Opponent H2H $2
+    win_vs_proj = 0.0
+    is_mirror = h2h_lineup_2.players == baseline_proj.players
+
+    if is_mirror:
+        win_vs_proj = 0.5  # tie
+    elif h2h_lineup_2.actual_fpts > baseline_proj.actual_fpts:
+        win_vs_proj = 1.0  # win
+    elif h2h_lineup_2.actual_fpts < baseline_proj.actual_fpts:
+        win_vs_proj = 0.0  # loss
+    else:
+        win_vs_proj = 0.5  # tie (rare with different lineups)
+
+    win_vs_top_10_median = 0.0
+
+    if h2h_lineup_2.actual_fpts > top_10_median_actual:
+        win_vs_top_10_median = 1.0  # win
+    elif h2h_lineup_2.actual_fpts < top_10_median_actual:
+        win_vs_top_10_median = 0.0  # loss
+    else:
+        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
+
+    results.append(
+        SlateResult(
+            slate_id=slate_id,
+            slate_games=slate_games,
+            strategy="Opponent H2H $2",
+            my_actual=h2h_lineup_2.actual_fpts,
+            baseline_proj=baseline_proj.actual_fpts,
+            win_vs_proj=win_vs_proj,
+            margin_vs_proj=h2h_lineup_2.actual_fpts - baseline_proj.actual_fpts,
+            is_mirror=is_mirror,
+            win_vs_top_10_median=win_vs_top_10_median,
+            margin_vs_top_10_median=h2h_lineup_2.actual_fpts - top_10_median_actual,
+        )
+    )
+
+    # Opponent H2H $3
+    win_vs_proj = 0.0
+    is_mirror = h2h_lineup_3.players == baseline_proj.players
+
+    if is_mirror:
+        win_vs_proj = 0.5  # tie
+    elif h2h_lineup_3.actual_fpts > baseline_proj.actual_fpts:
+        win_vs_proj = 1.0  # win
+    elif h2h_lineup_3.actual_fpts < baseline_proj.actual_fpts:
+        win_vs_proj = 0.0  # loss
+    else:
+        win_vs_proj = 0.5  # tie (rare with different lineups)
+
+    win_vs_top_10_median = 0.0
+
+    if h2h_lineup_3.actual_fpts > top_10_median_actual:
+        win_vs_top_10_median = 1.0  # win
+    elif h2h_lineup_3.actual_fpts < top_10_median_actual:
+        win_vs_top_10_median = 0.0  # loss
+    else:
+        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
+
+    results.append(
+        SlateResult(
+            slate_id=slate_id,
+            slate_games=slate_games,
+            strategy="Opponent H2H $3",
+            my_actual=h2h_lineup_3.actual_fpts,
+            baseline_proj=baseline_proj.actual_fpts,
+            win_vs_proj=win_vs_proj,
+            margin_vs_proj=h2h_lineup_3.actual_fpts - baseline_proj.actual_fpts,
+            is_mirror=is_mirror,
+            win_vs_top_10_median=win_vs_top_10_median,
+            margin_vs_top_10_median=h2h_lineup_3.actual_fpts - top_10_median_actual,
+        )
+    )
+
     return results
 
 
@@ -400,29 +536,66 @@ def aggregate_results(results: List[SlateResult]) -> pd.DataFrame:
 
 
 def evaluate_slate(
-    proj_path: str,
-    results_path: str,
-    candidate_lineups_path: str,
+    candidate_lineups_path: Path,
+    h2h_path: Path,
+    proj_path: Path,
+    results_path: Path,
     id_col: str = "player_key",
 ) -> pd.DataFrame:
     """
     Example backtest workflow. `top_fpts_indices` and `top_minutes_indices` are lists of
     lineups represented by player indices into the projection dataframe.
     """
-    proj, slate_games, _ = load_projection_csv(proj_path)
+    proj, slate_games, _ = load_projection_csv(proj_path, remove_nan=False)
     results = load_results_csv(results_path)
     merged = join_proj_results(proj, results, id_col=id_col)
-    top_fpts_indices, top_minutes_indices = load_candidate_lineups(
+    top_fpts_player_keys, top_minutes_player_keys = load_candidate_lineups(
         candidate_lineups_path
     )
+    h2h_results = load_h2h_results(h2h_path)
 
     # Candidate pool: top N by fpts and minutes, then dedupe by player set.
     top_fpts_lineups = [
-        lineup_from_indices(merged, idxs, id_col=id_col) for idxs in top_fpts_indices
+        lineup_from_player_keys(merged, player_keys, id_col=id_col)
+        for player_keys in top_fpts_player_keys
     ]
     top_minutes_lineups = [
-        lineup_from_indices(merged, idxs, id_col=id_col) for idxs in top_minutes_indices
+        lineup_from_player_keys(merged, player_keys, id_col=id_col)
+        for player_keys in top_minutes_player_keys
     ]
+
+    h2h_lineup_1 = lineup_from_player_keys(
+        merged,
+        [normalize_name(name) for name in h2h_results["fee_1"]["lineup"].values()],
+        id_col=id_col,
+    )
+
+    if h2h_lineup_1.actual_fpts != h2h_results["fee_1"]["points"]:
+        raise ValueError(
+            f"Calculated H2H lineup score, {h2h_lineup_1.actual_fpts}, does not equal recorded score {h2h_results['fee_1']['points']}"
+        )
+
+    h2h_lineup_2 = lineup_from_player_keys(
+        merged,
+        [normalize_name(name) for name in h2h_results["fee_2"]["lineup"].values()],
+        id_col=id_col,
+    )
+
+    if h2h_lineup_2.actual_fpts != h2h_results["fee_2"]["points"]:
+        raise ValueError(
+            f"Calculated H2H lineup score, {h2h_lineup_2.actual_fpts}, does not equal recorded score {h2h_results['fee_2']['points']}"
+        )
+
+    h2h_lineup_3 = lineup_from_player_keys(
+        merged,
+        [normalize_name(name) for name in h2h_results["fee_3"]["lineup"].values()],
+        id_col=id_col,
+    )
+
+    if h2h_lineup_3.actual_fpts != h2h_results["fee_3"]["points"]:
+        raise ValueError(
+            f"Calculated H2H lineup score, {h2h_lineup_3.actual_fpts}, does not equal recorded score {h2h_results['fee_3']['points']}"
+        )
 
     # Baseline: RG max projection lineup (first from top_fpts_indices).
     baseline_proj = top_fpts_lineups[0]
@@ -433,6 +606,9 @@ def evaluate_slate(
         top_fpts_lineups=top_fpts_lineups,
         top_minutes_lineups=top_minutes_lineups,
         baseline_proj=baseline_proj,
+        h2h_lineup_1=h2h_lineup_1,
+        h2h_lineup_2=h2h_lineup_2,
+        h2h_lineup_3=h2h_lineup_3,
     )
 
     return slate_results
@@ -443,12 +619,14 @@ if __name__ == "__main__":
     data_dir = Path("data")
     proj_dir = data_dir / "raw" / "rotogrinders"
     results_dir = data_dir / "raw" / "history"
-    candidate_dir = data_dir / "candidate_lineups"
+    candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
+    h2h_dir = data_dir / "processed" / "h2h"
 
     slate_results = []
 
     for results_file in results_dir.iterdir():
         meta = parse_filename(results_file.stem)
+        print(meta.slate_id)
 
         if meta.sport != "nba":
             continue
@@ -460,12 +638,15 @@ if __name__ == "__main__":
             candidate_dir
             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
         )
+        h2h_path = (
+            h2h_dir / f"{meta.sport}_{meta.slate}_{meta.site}_h2h_{meta.date}.json"
+        )
 
         slate_results += evaluate_slate(
+            candidate_lineups_path=candidate_lineups_path,
+            h2h_path=h2h_path,
             proj_path=proj_path,
             results_path=results_file,
-            candidate_lineups_path=candidate_lineups_path,
         )
     summary_df = aggregate_results(slate_results)
-    print(summary_df)
     summary_df.to_csv("data/processed/backtest.csv")

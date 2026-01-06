@@ -37,7 +37,7 @@ _FILENAME_RE = re.compile(
     r"""
     ^
     (?P<sport>[a-z]+)_
-    (?P<slate>[a-z\-]+)_
+    (?P<slate>[a-z0-9\-]+)_
     (?P<site>[a-z]+)
     (?:_(?P<source>[a-z]+))?
     _
@@ -109,7 +109,9 @@ def ensure_output_path(path_str: str) -> Path:
     return path
 
 
-def load_projection_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
+def load_projection_csv(
+    path: Path, remove_nan: bool = True
+) -> tuple[pd.DataFrame, int, list[str]]:
     cols = []
     if "rotogrinders" in str(path):
         cols = [
@@ -156,7 +158,14 @@ def load_projection_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
     if "rotogrinders" in str(path):
         df["floor"] = coerce_numeric(df["floor"])
 
-    df = df.dropna(subset=cols)
+    if remove_nan:
+        df = df.dropna(subset=cols)
+    else:
+        df["projection_missing"] = df["proj_fpts"].isna() | df["proj_minutes"].isna()
+        df["proj_fpts_filled"] = df["proj_fpts"].fillna(0.0)
+        df["proj_minutes_filled"] = df["proj_minutes"].fillna(0.0)
+        df["floor_filled"] = df["floor"].fillna(0.0)
+
     df = df[df["positions"].map(bool)]
 
     def infer_slate_games(frame: pd.DataFrame) -> int:

@@ -22,6 +22,7 @@ from utils import (
     ResultsFileMeta,
     adjusted_score,
     load_projection_csv,
+    normalize_name,
     parse_filename,
     print_table,
     total_fragile_minutes,
@@ -38,17 +39,14 @@ def build_player_index_map(
     return {name: idx for idx, name in enumerate(df[id_col])}
 
 
-def lineup_df_to_indices(
+def lineup_df_to_player_keys(
     lineup_df: pd.DataFrame,
-    player_index_map: dict[str, int],
     id_col: str = "player_name",
 ) -> list[int]:
-    indices = []
+    player_keys = []
     for name in lineup_df[id_col]:
-        if name not in player_index_map:
-            raise KeyError(f"Player {name} not found in projection file")
-        indices.append(player_index_map[name])
-    return indices
+        player_keys.append(normalize_name(name))
+    return player_keys
 
 
 def print_lineup(df: pd.DataFrame, cols: list[str]) -> None:
@@ -71,7 +69,7 @@ def print_lineup(df: pd.DataFrame, cols: list[str]) -> None:
 def write_lineup(
     lineup: pd.DataFrame, cols: list[str], out_file: io.TextIOWrapper
 ) -> None:
-    out_file.write(str(lineup[["slot"] + cols]))
+    out_file.write(lineup[["slot"] + cols].to_string(index=False))
     totals = {
         "total_salary": lineup["salary"].sum(),
         "total_proj_minutes": lineup["proj_minutes"].sum(),
@@ -88,16 +86,16 @@ def write_lineups_to_file(
     out_dir: str,
     meta: ResultsFileMeta,
     slate_size: int,
-    top_fpts_indices: list[list[int]],
-    top_minutes_indices: list[list[int]],
+    top_fpts_player_keys: list[list[int]],
+    top_minutes_player_keys: list[list[int]],
 ):
     payload = {
         "slate_id": meta.slate_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "projection_source": meta.source,
         "slate_size (games)": slate_size,
-        "top_fpts": top_fpts_indices,
-        "top_minutes": top_minutes_indices,
+        "top_fpts": top_fpts_player_keys,
+        "top_minutes": top_minutes_player_keys,
     }
 
     out_path = Path(out_dir)
@@ -327,25 +325,20 @@ def main(argv: Iterable[str]) -> int:
         adjusted_lineups, key=lambda x: x["adjusted_score"], reverse=True
     )
 
-    top_fpts_indices = [
-        lineup_df_to_indices(lu["lineup"], player_index_map) for lu in max_fpts_lineups
+    top_fpts_player_keys = [
+        lineup_df_to_player_keys(lu["lineup"]) for lu in max_fpts_lineups
     ]
 
-    top_minutes_indices = [
-        lineup_df_to_indices(lu["lineup"], player_index_map)
-        for lu in max_minutes_lineups
+    top_minutes_player_keys = [
+        lineup_df_to_player_keys(lu["lineup"]) for lu in max_minutes_lineups
     ]
-
-    assert all(len(lu) == 8 for lu in top_fpts_indices)
-    assert all(len(lu) == 8 for lu in top_minutes_indices)
-    assert len(set(tuple(lu) for lu in top_fpts_indices)) == len(top_fpts_indices)
 
     write_lineups_to_file(
         out_dir="data/candidate_lineups/",
         meta=meta,
         slate_size=slate_games,
-        top_fpts_indices=top_fpts_indices,
-        top_minutes_indices=top_minutes_indices,
+        top_fpts_player_keys=top_fpts_player_keys,
+        top_minutes_player_keys=top_minutes_player_keys,
     )
 
     max_fpts = 0
@@ -355,27 +348,27 @@ def main(argv: Iterable[str]) -> int:
 
     with open(args.output, "w") as out_file:
         # Print max minute lineup info to stdout
-        print("\nMax Minutes Lineup")
+        print("\nMax Minutes Lineup ")
         print_lineup(max_minutes_lineups[0]["lineup"], cols)
 
         # Write max minute lineup info to output file
-        out_file.write("\nMax Minutes Lineup")
+        out_file.write("\nMax Minutes Lineup ")
         write_lineup(max_minutes_lineups[0]["lineup"], cols, out_file)
 
         # Print max fpts lineup info to stdout
-        print("\nMax FPTS Lineup")
+        print("\nMax FPTS Lineup ")
         print_lineup(max_fpts_lineups[0]["lineup"], cols)
 
         # Write max fpts lineup info to output file
-        out_file.write("\nMax FPTS Lineup")
+        out_file.write("\nMax FPTS Lineup ")
         write_lineup(max_fpts_lineups[0]["lineup"], cols, out_file)
 
         # Print top k lineups to stdout and write them to the output file
         for i, lineup in enumerate(adjusted_lineups):
-            print(f"\nLineup #{i}")
+            print(f"\nLineup #{i} ")
             print_lineup(lineup["lineup"], cols)
 
-            out_file.write(f"\nLineup #{i}")
+            out_file.write(f"\nLineup #{i} ")
             write_lineup(lineup["lineup"], cols, out_file)
 
             max_fpts = max(max_fpts, lineup["lineup"]["proj_fpts"].sum())
