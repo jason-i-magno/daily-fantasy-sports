@@ -48,6 +48,18 @@ _FILENAME_RE = re.compile(
     re.VERBOSE,
 )
 
+_SLATE_ID_RE = re.compile(
+    r"""
+    ^
+    (?P<sport>[a-z]+)_
+    (?P<slate>[a-z0-9\-]+)_
+    (?P<site>[a-z]+)_
+    (?P<date>\d{4}-\d{2}-\d{2})
+    $
+    """,
+    re.VERBOSE,
+)
+
 
 # ----------------------------
 # Data structures
@@ -61,6 +73,15 @@ class ResultsFileMeta:
     datatype: str
     date: str  # ISO yyyy-mm-dd
     slate_id: str
+
+
+@dataclasses.dataclass(frozen=True)
+class SlateMeta:
+    sport: str
+    slate: str
+    site: str
+    date: str  # ISO yyyy-mm-dd
+    id: str
 
 
 # ----------------------------
@@ -164,7 +185,9 @@ def load_projection_csv(
         df["projection_missing"] = df["proj_fpts"].isna() | df["proj_minutes"].isna()
         df["proj_fpts_filled"] = df["proj_fpts"].fillna(0.0)
         df["proj_minutes_filled"] = df["proj_minutes"].fillna(0.0)
-        df["floor_filled"] = df["floor"].fillna(0.0)
+
+        if "rotogrinders" in str(path):
+            df["floor_filled"] = df["floor"].fillna(0.0)
 
     df = df[df["positions"].map(bool)]
 
@@ -244,6 +267,26 @@ def parse_positions(raw: str) -> Set[str]:
     if not isinstance(raw, str):
         return set()
     return {p.strip().upper() for p in raw.split("/") if p.strip()}
+
+
+def parse_slate_id(slate_id: str) -> SlateMeta:
+    match = _SLATE_ID_RE.match(slate_id)
+
+    if not match:
+        raise ValueError(
+            f"Slate ID does not match expected format: {slate_id}\n"
+            "Expected: {sport}_{slate}_{site}_YYYY-MM-DD"
+        )
+
+    parts = match.groupdict()
+
+    return SlateMeta(
+        sport=parts["sport"],
+        slate=parts["slate"],
+        site=parts["site"],
+        date=parts["date"],
+        id=slate_id,
+    )
 
 
 def print_table(

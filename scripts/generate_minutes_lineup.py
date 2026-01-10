@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +24,7 @@ from utils import (
     adjusted_score,
     load_projection_csv,
     normalize_name,
-    parse_filename,
-    print_table,
+    parse_slate_id,
     total_fragile_minutes,
 )
 
@@ -49,23 +49,6 @@ def lineup_df_to_player_keys(
     return player_keys
 
 
-def print_lineup(df: pd.DataFrame, cols: list[str]) -> None:
-    print_table(
-        df,
-        cols=["slot"] + cols,
-        empty_msg="No valid lineup found under the given cap and slot constraints.",
-    )
-    totals = {
-        "total_salary": df["salary"].sum(),
-        "total_proj_minutes": df["proj_minutes"].sum(),
-        "total_proj_fpts": df["proj_fpts"].sum(),
-        "total_ceiling": df["ceiling"].sum(),
-    } | {"total_floor": df["floor"].sum() if "floor" in cols else 0.0}
-    print("\nTotals:")
-    for k, v in totals.items():
-        print(f"  {k}: {v:.2f}")
-
-
 def write_lineup(
     lineup: pd.DataFrame, cols: list[str], out_file: io.TextIOWrapper
 ) -> None:
@@ -86,13 +69,14 @@ def write_lineups_to_file(
     out_dir: str,
     meta: ResultsFileMeta,
     slate_size: int,
+    proj_source: str,
     top_fpts_player_keys: list[list[int]],
     top_minutes_player_keys: list[list[int]],
 ):
     payload = {
-        "slate_id": meta.slate_id,
+        "slate_id": meta.id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "projection_source": meta.source,
+        "projection_source": proj_source,
         "slate_size (games)": slate_size,
         "top_fpts": top_fpts_player_keys,
         "top_minutes": top_minutes_player_keys,
@@ -128,7 +112,6 @@ SLOTS: List[Dict] = [
 
 def build_ilp_with_slots(
     df: pd.DataFrame,
-    cap: float,
     maximize_fpts: bool = False,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
@@ -160,13 +143,14 @@ def build_ilp_with_slots(
         )
 
     # Salary cap
+    salary_cap = 50000
     prob += (
         pulp.lpSum(
             df.loc[i, "salary"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
-        <= cap
+        <= salary_cap
     )
 
     # Each slot filled once
@@ -211,12 +195,11 @@ def extract_lineup(df: pd.DataFrame, y, cols: list[str]) -> pd.DataFrame:
 
 def solve_top_k_lineups(
     df: pd.DataFrame,
-    cap: float,
     cols: list[str],
     k: int = 10,
     maximize_fpts: bool = False,
 ):
-    prob, y = build_ilp_with_slots(df, cap, maximize_fpts=maximize_fpts)
+    prob, y = build_ilp_with_slots(df, maximize_fpts=maximize_fpts)
 
     lineups = []
     chosen_players = set()
@@ -255,8 +238,15 @@ def solve_top_k_lineups(
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to DK salary CSV")
-    parser.add_argument("--cap", type=float, required=True, help="Salary cap")
+    parser.add_argument("-s", "--slate-id", required=True, help="Slate ID")
+    parser.add_argument(
+        "-p",
+        "--projection-source",
+        type=str,
+        choices=["etr", "rg"],
+        required=True,
+        help="Source of projection data.",
+    )
     parser.add_argument(
         "-k", "--k-lineups", type=int, default=1, help="Number of lineups to generate"
     )
@@ -270,20 +260,69 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         default="data/processed/dk_max_minutes_lineup.csv",
         help="Output CSV path",
     )
+    parser.add_argument(
+        "-w",
+        "--write-candidate-lineups",
+        action="store_true",
+        help="Flag to write candidate lineups to a file.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
-    meta = parse_filename(Path(args.input).stem)
+    meta = parse_slate_id(args.slate_id)
+    print(meta.id)
 
-    df, slate_games, cols = load_projection_csv(args.input)
-    player_index_map = build_player_index_map(df)
+    etr_proj_path = Path(
+        f"data/raw/etr/{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
+    )
+
+    if args.projection_source == "etr" and not etr_proj_path.is_file():
+        logging.error(f"ETR projection file not found '{etr_proj_path}'")
+
+        return 1
+
+    rg_proj_path = Path(
+        f"data/raw/rotogrinders/{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
+    )
+
+    if not rg_proj_path.is_file():
+        logging.error(f"Rotogrinders projection file not found '{rg_proj_path}'")
+
+        return 1
+
+    rg_df, slate_games, cols = load_projection_csv(rg_proj_path)
+    etr_df, slate_games, cols = load_projection_csv(etr_proj_path, remove_nan=False)
+
+    etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
+
+    rg_salary_lookup = rg_df[["player_key", "salary"]].rename(
+        columns={"salary": "rg_salary"}
+    )
+    etr_slate_df = etr_slate_df.merge(
+        rg_salary_lookup,
+        on="player_key",
+        how="left",
+    )
+    etr_slate_df["salary"] = etr_slate_df["rg_salary"].combine_first(
+        etr_slate_df["salary"]
+    )
+    etr_slate_df = etr_slate_df.drop(columns=["rg_salary"])
+
+    # Players in ETR but not RG (still on slate teams)
+    extra_etr_players = set(etr_slate_df["player_key"]) - set(rg_df["player_key"])
+    print(f"{extra_etr_players=}")
+
+    # Players in RG but missing from ETR
+    missing_etr_players = set(rg_df["player_key"]) - set(etr_slate_df["player_key"])
+    print(f"{missing_etr_players=}")
+
+    df = rg_df if args.projection_source == "rg" else etr_slate_df
 
     # Generate top k maximum minutes lineups
     max_minutes_lineups = solve_top_k_lineups(
         df,
-        cap=args.cap,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=False,
@@ -292,7 +331,6 @@ def main(argv: Iterable[str]) -> int:
     # Generate top k maximum FPTs lineus
     max_fpts_lineups = solve_top_k_lineups(
         df,
-        cap=args.cap,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True,
@@ -304,7 +342,6 @@ def main(argv: Iterable[str]) -> int:
 
     adjusted_lineups = solve_top_k_lineups(
         df,
-        cap=args.cap,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True if args.maximize_fpts else False,
@@ -333,13 +370,15 @@ def main(argv: Iterable[str]) -> int:
         lineup_df_to_player_keys(lu["lineup"]) for lu in max_minutes_lineups
     ]
 
-    write_lineups_to_file(
-        out_dir="data/candidate_lineups/",
-        meta=meta,
-        slate_size=slate_games,
-        top_fpts_player_keys=top_fpts_player_keys,
-        top_minutes_player_keys=top_minutes_player_keys,
-    )
+    if args.write_candidate_lineups:
+        write_lineups_to_file(
+            out_dir=f"data/candidate_lineups/{'rotogrinders' if args.projection_source == 'rg' else 'etr'}",
+            meta=meta,
+            slate_size=slate_games,
+            proj_source=args.projection_source,
+            top_fpts_player_keys=top_fpts_player_keys,
+            top_minutes_player_keys=top_minutes_player_keys,
+        )
 
     max_fpts = 0
     max_minutes = 0
@@ -347,17 +386,9 @@ def main(argv: Iterable[str]) -> int:
     max_floor = 0
 
     with open(args.output, "w") as out_file:
-        # Print max minute lineup info to stdout
-        print("\nMax Minutes Lineup ")
-        print_lineup(max_minutes_lineups[0]["lineup"], cols)
-
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup ")
         write_lineup(max_minutes_lineups[0]["lineup"], cols, out_file)
-
-        # Print max fpts lineup info to stdout
-        print("\nMax FPTS Lineup ")
-        print_lineup(max_fpts_lineups[0]["lineup"], cols)
 
         # Write max fpts lineup info to output file
         out_file.write("\nMax FPTS Lineup ")
@@ -365,9 +396,6 @@ def main(argv: Iterable[str]) -> int:
 
         # Print top k lineups to stdout and write them to the output file
         for i, lineup in enumerate(adjusted_lineups):
-            print(f"\nLineup #{i} ")
-            print_lineup(lineup["lineup"], cols)
-
             out_file.write(f"\nLineup #{i} ")
             write_lineup(lineup["lineup"], cols, out_file)
 
@@ -377,11 +405,6 @@ def main(argv: Iterable[str]) -> int:
 
             if "floor" in cols:
                 max_floor = max(max_floor, lineup["lineup"]["floor"].sum())
-
-    print(f"{max_fpts=}")
-    print(f"{max_minutes=}")
-    print(f"{max_ceil=}")
-    print(f"{max_floor=}")
 
     return 0
 

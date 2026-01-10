@@ -52,11 +52,12 @@ class SlateResult:
     strategy: str
     my_actual: float
     baseline_proj: float
-    win_vs_proj: float
-    margin_vs_proj: float
+    win: float
+    margin: float
     is_mirror: bool
-    win_vs_top_10_median: float
-    margin_vs_top_10_median: float
+    win_median: float
+    margin_median: float
+    winnings: float
 
 
 # ----------------------------
@@ -134,7 +135,8 @@ def lineup_from_player_keys(
     players = frozenset(lineup_df[id_col].tolist())
     projected_fpts = float(lineup_df["proj_fpts"].sum())
     projected_minutes = float(lineup_df["proj_minutes"].sum())
-    rg_floor = float(lineup_df["floor"].sum())
+    # rg_floor = float(lineup_df["floor"].sum())
+    rg_floor = 0
     fragile_count = int((lineup_df["proj_minutes"] < 30).sum())
     actual_fpts = float(lineup_df["FPTS"].sum())
     return Lineup(
@@ -165,15 +167,13 @@ def dedupe_lineups(lineups: List[Lineup]) -> List[Lineup]:
 # ----------------------------
 # Evaluation
 # ----------------------------
-def evaluate_lineups(
+def evaluate_proj_lineups(
     slate_id: str,
     slate_games: int,
     top_fpts_lineups: List[Lineup],
     top_minutes_lineups: List[Lineup],
     baseline_proj: Lineup,
-    h2h_lineup_1: Lineup,
-    h2h_lineup_2: Lineup,
-    h2h_lineup_3: Lineup,
+    proj_source: str,
 ) -> List[SlateResult]:
     results: List[SlateResult] = []
 
@@ -181,116 +181,53 @@ def evaluate_lineups(
     actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
     top_10_median_actual = actual_scores[len(actual_scores) // 2]
 
-    max_minutes_lineup = top_minutes_lineups[0]
-    win_vs_proj = 0.0
-    is_mirror = max_minutes_lineup.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif max_minutes_lineup.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif max_minutes_lineup.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if max_minutes_lineup.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif max_minutes_lineup.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    # for i, minutes_lineup in enumerate(top_minutes_lineups):
-    #     results.append(
-    #         SlateResult(
-    #             slate_id=f"{slate_id}_{i}",
-    #             slate_games=slate_games,
-    #             strategy="max_minutes",
-    #             my_actual=minutes_lineup.actual_fpts,
-    #             baseline_proj=baseline_proj.actual_fpts,
-    #             win_vs_proj=int(
-    #                 minutes_lineup.actual_fpts >= baseline_proj.actual_fpts
-    #             ),
-    #             margin_vs_proj=minutes_lineup.actual_fpts - baseline_proj.actual_fpts,
-    #         )
-    #     )
+    # Max FPTS
+    max_fpts_lineup = top_fpts_lineups[0]
 
     results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="max_minutes",
-            my_actual=max_minutes_lineup.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=max_minutes_lineup.actual_fpts - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=max_minutes_lineup.actual_fpts
-            - top_10_median_actual,
+        get_slate_result(
+            baseline_proj,
+            max_fpts_lineup,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} Max FPTs",
         )
     )
 
+    # Max Minutes
+    max_minutes_lineup = top_minutes_lineups[0]
+
+    results.append(
+        get_slate_result(
+            baseline_proj,
+            max_minutes_lineup,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} Max Mins",
+        )
+    )
+
+    # Max Minutes within Top FPTs
     max_minutes_within_top_fpts_lineup = sorted(
         top_fpts_lineups,
         key=lambda lu: (lu.projected_minutes, lu.projected_fpts),
         reverse=True,
     )[0]
-    win_vs_proj = 0.0
-    is_mirror = max_minutes_within_top_fpts_lineup.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif max_minutes_within_top_fpts_lineup.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif max_minutes_within_top_fpts_lineup.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if max_minutes_within_top_fpts_lineup.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif max_minutes_within_top_fpts_lineup.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    # for i in range(10):
-    #     lineup = max_minutes_within_top_fpts_lineups[i]
-    #     results.append(
-    #         SlateResult(
-    #             slate_id=f"{slate_id}_{i}",
-    #             slate_games=slate_games,
-    #             strategy="max_minutes_within_top_fpts",
-    #             my_actual=lineup.actual_fpts,
-    #             baseline_proj=baseline_proj.actual_fpts,
-    #             win_vs_proj=int(lineup.actual_fpts >= baseline_proj.actual_fpts),
-    #             margin_vs_proj=lineup.actual_fpts - baseline_proj.actual_fpts,
-    #         )
-    #     )
 
     results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="max_minutes_within_top_fpts",
-            my_actual=max_minutes_within_top_fpts_lineup.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=max_minutes_within_top_fpts_lineup.actual_fpts
-            - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=max_minutes_within_top_fpts_lineup.actual_fpts
-            - top_10_median_actual,
+        get_slate_result(
+            baseline_proj,
+            max_minutes_within_top_fpts_lineup,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} Max Mins in Top FPTs",
         )
     )
 
+    # Adjusted Fragile
     adjusted_fragile_lineup = sorted(
         top_fpts_lineups,
         key=lambda lu: (
@@ -303,55 +240,15 @@ def evaluate_lineups(
         ),
         reverse=True,
     )[0]
-    win_vs_proj = 0.0
-    is_mirror = adjusted_fragile_lineup.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif adjusted_fragile_lineup.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif adjusted_fragile_lineup.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if adjusted_fragile_lineup.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif adjusted_fragile_lineup.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    # for i in range(10):
-    #     lineup = adjusted_fragile_lineups[i]
-    #     results.append(
-    #         SlateResult(
-    #             slate_id=f"{slate_id}_{i}",
-    #             slate_games=slate_games,
-    #             strategy="adjusted_fragile",
-    #             my_actual=lineup.actual_fpts,
-    #             baseline_proj=baseline_proj.actual_fpts,
-    #             win_vs_proj=int(lineup.actual_fpts >= baseline_proj.actual_fpts),
-    #             margin_vs_proj=lineup.actual_fpts - baseline_proj.actual_fpts,
-    #         )
-    #     )
 
     results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="adjusted_fragile",
-            my_actual=adjusted_fragile_lineup.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=adjusted_fragile_lineup.actual_fpts
-            - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=adjusted_fragile_lineup.actual_fpts
-            - top_10_median_actual,
+        get_slate_result(
+            baseline_proj,
+            adjusted_fragile_lineup,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} Adj Frag",
         )
     )
 
@@ -369,129 +266,178 @@ def evaluate_lineups(
         SlateResult(
             slate_id=slate_id,
             slate_games=slate_games,
-            strategy="top_10_median (Uses actual scores)",
+            strategy=f"{proj_source} median",
             my_actual=top_10_median_actual,
             baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=top_10_median_actual - baseline_proj.actual_fpts,
+            win=win_vs_proj,
+            margin=top_10_median_actual - baseline_proj.actual_fpts,
             is_mirror=False,
-            win_vs_top_10_median=0.5,
-            margin_vs_top_10_median=0.0,
-        )
-    )
-
-    # Opponent H2H $1
-    win_vs_proj = 0.0
-    is_mirror = h2h_lineup_1.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif h2h_lineup_1.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif h2h_lineup_1.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if h2h_lineup_1.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif h2h_lineup_1.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="Opponent H2H $1",
-            my_actual=h2h_lineup_1.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=h2h_lineup_1.actual_fpts - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=h2h_lineup_1.actual_fpts - top_10_median_actual,
-        )
-    )
-
-    # Opponent H2H $2
-    win_vs_proj = 0.0
-    is_mirror = h2h_lineup_2.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif h2h_lineup_2.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif h2h_lineup_2.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if h2h_lineup_2.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif h2h_lineup_2.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="Opponent H2H $2",
-            my_actual=h2h_lineup_2.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=h2h_lineup_2.actual_fpts - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=h2h_lineup_2.actual_fpts - top_10_median_actual,
-        )
-    )
-
-    # Opponent H2H $3
-    win_vs_proj = 0.0
-    is_mirror = h2h_lineup_3.players == baseline_proj.players
-
-    if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif h2h_lineup_3.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif h2h_lineup_3.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if h2h_lineup_3.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif h2h_lineup_3.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
-
-    results.append(
-        SlateResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy="Opponent H2H $3",
-            my_actual=h2h_lineup_3.actual_fpts,
-            baseline_proj=baseline_proj.actual_fpts,
-            win_vs_proj=win_vs_proj,
-            margin_vs_proj=h2h_lineup_3.actual_fpts - baseline_proj.actual_fpts,
-            is_mirror=is_mirror,
-            win_vs_top_10_median=win_vs_top_10_median,
-            margin_vs_top_10_median=h2h_lineup_3.actual_fpts - top_10_median_actual,
+            win_median=0.5,
+            margin_median=0.0,
+            winnings=0,
         )
     )
 
     return results
+
+
+def evaluate_h2h_lineups(
+    slate_id: str,
+    slate_games: int,
+    top_fpts_lineups: List[Lineup],
+    baseline_proj: Lineup,
+    h2h_lineup_1: Lineup,
+    h2h_lineup_2: Lineup,
+    h2h_lineup_3: Lineup,
+    proj_source: str,
+) -> List[SlateResult]:
+    results: List[SlateResult] = []
+
+    top_10_fpts_lineups = top_fpts_lineups[:10]
+    actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
+    top_10_median_actual = actual_scores[len(actual_scores) // 2]
+
+    # Adjusted Fragile
+    adjusted_fragile_lineup = sorted(
+        top_fpts_lineups,
+        key=lambda lu: (
+            adjusted_score(
+                lu.projected_fpts,
+                lu.projected_minutes,
+                lu.total_fragile_minutes,
+                slate_games,
+            )
+        ),
+        reverse=True,
+    )[0]
+
+    # Opponent H2H $1 vs Adjusted Fragile
+    results.append(
+        get_slate_result(
+            adjusted_fragile_lineup,
+            h2h_lineup_1,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $1 Adj Frag",
+            fee=1,
+        )
+    )
+
+    # Opponent H2H $2 vs Adjusted Fragile
+    results.append(
+        get_slate_result(
+            adjusted_fragile_lineup,
+            h2h_lineup_2,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $2 Adj Frag",
+            fee=2,
+        )
+    )
+
+    # Opponent H2H $3 vs Adjusted Fragile
+    results.append(
+        get_slate_result(
+            adjusted_fragile_lineup,
+            h2h_lineup_3,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $3 Adj Frag",
+            fee=3,
+        )
+    )
+
+    # Opponent H2H $1 vs Max FPTs
+    results.append(
+        get_slate_result(
+            baseline_proj,
+            h2h_lineup_1,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $1 Max FPTs",
+            fee=1,
+        )
+    )
+
+    # Opponent H2H $2 vs Max FPTs
+    results.append(
+        get_slate_result(
+            baseline_proj,
+            h2h_lineup_2,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $2 Max FPTs",
+            fee=2,
+        )
+    )
+
+    # Opponent H2H $3 vs Max FPTs
+    results.append(
+        get_slate_result(
+            baseline_proj,
+            h2h_lineup_3,
+            top_10_median_actual,
+            slate_id,
+            slate_games,
+            f"{proj_source} H2H $3 Max FPTs",
+            fee=3,
+        )
+    )
+
+    return results
+
+
+def get_slate_result(
+    baseline_proj, lineup, top_10_median_actual, slate_id, slate_games, strategy, fee=1
+):
+    win_vs_proj = 0.0
+    is_mirror = lineup.players == baseline_proj.players
+
+    if is_mirror:
+        win_vs_proj = 0.5  # tie
+    elif lineup.actual_fpts > baseline_proj.actual_fpts:
+        win_vs_proj = 1.0  # win
+    elif lineup.actual_fpts < baseline_proj.actual_fpts:
+        win_vs_proj = 0.0  # loss
+    else:
+        win_vs_proj = 0.5  # tie (rare with different lineups)
+
+    win_vs_top_10_median = 0.0
+
+    if lineup.actual_fpts > top_10_median_actual:
+        win_vs_top_10_median = 1.0  # win
+    elif lineup.actual_fpts < top_10_median_actual:
+        win_vs_top_10_median = 0.0  # loss
+    else:
+        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
+
+    winnings = -fee
+
+    if is_mirror:
+        winnings = 0
+    elif lineup.actual_fpts < baseline_proj.actual_fpts:
+        winnings = fee * 0.8
+    elif lineup.actual_fpts == baseline_proj.actual_fpts:
+        winnings = -fee * 0.2
+
+    return SlateResult(
+        slate_id=slate_id,
+        slate_games=slate_games,
+        strategy=strategy,
+        my_actual=lineup.actual_fpts,
+        baseline_proj=baseline_proj.actual_fpts,
+        win=win_vs_proj,
+        margin=lineup.actual_fpts - baseline_proj.actual_fpts,
+        is_mirror=is_mirror,
+        win_median=win_vs_top_10_median,
+        margin_median=lineup.actual_fpts - top_10_median_actual,
+        winnings=winnings,
+    )
 
 
 def aggregate_results(results: List[SlateResult]) -> pd.DataFrame:
@@ -509,36 +455,40 @@ def aggregate_results(results: List[SlateResult]) -> pd.DataFrame:
     df["slate_bucket"] = df["slate_games"].map(bucket)
     df["non_mirror"] = 1 - df["is_mirror"]
     # Only count wins on non-mirrors; NaN for mirrors so they don't affect mean
-    df["win_vs_proj_non_mirror"] = df.apply(
-        lambda r: r["win_vs_proj"] if r["is_mirror"] == 0 else None,
+    df["win_no_mirror"] = df.apply(
+        lambda r: r["win"] if r["is_mirror"] == 0 else None,
         axis=1,
     )
     agg = (
         df.groupby(["strategy", "slate_bucket"])
         .agg(
             # Overall score vs RG (mirrors count as 0.5)
-            win_rate_vs_proj=("win_vs_proj", "mean"),
+            win=("win", "mean"),
             # Edge win rate: only when you deviated
-            win_rate_vs_proj_non_mirror=("win_vs_proj_non_mirror", "mean"),
+            win_no_mirror=("win_no_mirror", "mean"),
             # How often you mirrored RG
             mirror_rate=("is_mirror", "mean"),
             # Margins (still informative overall)
-            avg_margin_vs_proj=("margin_vs_proj", "mean"),
+            margin=("margin", "mean"),
             # Overall score vs RG (mirrors count as 0.5)
-            win_rate_vs_top_10_median=("win_vs_top_10_median", "mean"),
+            win_median=("win_median", "mean"),
             # Margins (still informative overall)
-            avg_margin_vs_top_10_median=("margin_vs_top_10_median", "mean"),
+            margin_median=("margin_median", "mean"),
             slates=("slate_id", "nunique"),
+            winnings=("winnings", "sum"),
         )
+        .round(3)
         .reset_index()
     )
     return agg
 
 
 def evaluate_slate(
-    candidate_lineups_path: Path,
+    rg_candidate_lineups_path: Path,
+    etr_candidate_lineups_path: Path,
     h2h_path: Path,
-    proj_path: Path,
+    rg_proj_path: Path,
+    etr_proj_path: Path,
     results_path: Path,
     id_col: str = "player_key",
 ) -> pd.DataFrame:
@@ -546,26 +496,39 @@ def evaluate_slate(
     Example backtest workflow. `top_fpts_indices` and `top_minutes_indices` are lists of
     lineups represented by player indices into the projection dataframe.
     """
-    proj, slate_games, _ = load_projection_csv(proj_path, remove_nan=False)
+    rg_proj, slate_games, _ = load_projection_csv(rg_proj_path, remove_nan=False)
+    etr_proj, _, _ = load_projection_csv(etr_proj_path, remove_nan=False)
     results = load_results_csv(results_path)
-    merged = join_proj_results(proj, results, id_col=id_col)
-    top_fpts_player_keys, top_minutes_player_keys = load_candidate_lineups(
-        candidate_lineups_path
+    rg_merged = join_proj_results(rg_proj, results, id_col=id_col)
+    etr_merged = join_proj_results(etr_proj, results, id_col=id_col)
+    rg_top_fpts_player_keys, rg_top_minutes_player_keys = load_candidate_lineups(
+        rg_candidate_lineups_path
+    )
+    etr_top_fpts_player_keys, etr_top_minutes_player_keys = load_candidate_lineups(
+        etr_candidate_lineups_path
     )
     h2h_results = load_h2h_results(h2h_path)
 
     # Candidate pool: top N by fpts and minutes, then dedupe by player set.
-    top_fpts_lineups = [
-        lineup_from_player_keys(merged, player_keys, id_col=id_col)
-        for player_keys in top_fpts_player_keys
+    rg_top_fpts_lineups = [
+        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
+        for player_keys in rg_top_fpts_player_keys
     ]
-    top_minutes_lineups = [
-        lineup_from_player_keys(merged, player_keys, id_col=id_col)
-        for player_keys in top_minutes_player_keys
+    etr_top_fpts_lineups = [
+        lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
+        for player_keys in etr_top_fpts_player_keys
+    ]
+    rg_top_minutes_lineups = [
+        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
+        for player_keys in rg_top_minutes_player_keys
+    ]
+    etr_top_minutes_lineups = [
+        lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
+        for player_keys in etr_top_minutes_player_keys
     ]
 
     h2h_lineup_1 = lineup_from_player_keys(
-        merged,
+        rg_merged,
         [normalize_name(name) for name in h2h_results["fee_1"]["lineup"].values()],
         id_col=id_col,
     )
@@ -576,7 +539,7 @@ def evaluate_slate(
         )
 
     h2h_lineup_2 = lineup_from_player_keys(
-        merged,
+        rg_merged,
         [normalize_name(name) for name in h2h_results["fee_2"]["lineup"].values()],
         id_col=id_col,
     )
@@ -587,7 +550,7 @@ def evaluate_slate(
         )
 
     h2h_lineup_3 = lineup_from_player_keys(
-        merged,
+        rg_merged,
         [normalize_name(name) for name in h2h_results["fee_3"]["lineup"].values()],
         id_col=id_col,
     )
@@ -598,17 +561,46 @@ def evaluate_slate(
         )
 
     # Baseline: RG max projection lineup (first from top_fpts_indices).
-    baseline_proj = top_fpts_lineups[0]
+    baseline_proj = rg_top_fpts_lineups[0]
 
-    slate_results = evaluate_lineups(
-        slate_id=Path(proj_path).stem,
+    slate_results = evaluate_proj_lineups(
+        slate_id=Path(rg_proj_path).stem,
         slate_games=slate_games,
-        top_fpts_lineups=top_fpts_lineups,
-        top_minutes_lineups=top_minutes_lineups,
+        top_fpts_lineups=rg_top_fpts_lineups,
+        top_minutes_lineups=rg_top_minutes_lineups,
+        baseline_proj=baseline_proj,
+        proj_source="RG",
+    )
+
+    slate_results += evaluate_proj_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=etr_top_fpts_lineups,
+        top_minutes_lineups=etr_top_minutes_lineups,
+        baseline_proj=baseline_proj,
+        proj_source="ETR",
+    )
+
+    slate_results += evaluate_h2h_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=rg_top_fpts_lineups,
         baseline_proj=baseline_proj,
         h2h_lineup_1=h2h_lineup_1,
         h2h_lineup_2=h2h_lineup_2,
         h2h_lineup_3=h2h_lineup_3,
+        proj_source="RG",
+    )
+
+    slate_results += evaluate_h2h_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=etr_top_fpts_lineups,
+        baseline_proj=etr_top_fpts_lineups[0],
+        h2h_lineup_1=h2h_lineup_1,
+        h2h_lineup_2=h2h_lineup_2,
+        h2h_lineup_3=h2h_lineup_3,
+        proj_source="ETR",
     )
 
     return slate_results
@@ -617,9 +609,11 @@ def evaluate_slate(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     data_dir = Path("data")
-    proj_dir = data_dir / "raw" / "rotogrinders"
+    rg_proj_dir = data_dir / "raw" / "rotogrinders"
+    etr_proj_dir = data_dir / "raw" / "etr"
     results_dir = data_dir / "raw" / "history"
-    candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
+    rg_candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
+    etr_candidate_dir = data_dir / "candidate_lineups" / "etr"
     h2h_dir = data_dir / "processed" / "h2h"
 
     slate_results = []
@@ -630,12 +624,20 @@ if __name__ == "__main__":
 
         if meta.sport != "nba":
             continue
-        proj_path = (
-            proj_dir
+        rg_proj_path = (
+            rg_proj_dir
             / f"{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
         )
-        candidate_lineups_path = (
-            candidate_dir
+        etr_proj_path = (
+            etr_proj_dir
+            / f"{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
+        )
+        rg_candidate_lineups_path = (
+            rg_candidate_dir
+            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+        )
+        etr_candidate_lineups_path = (
+            etr_candidate_dir
             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
         )
         h2h_path = (
@@ -643,9 +645,11 @@ if __name__ == "__main__":
         )
 
         slate_results += evaluate_slate(
-            candidate_lineups_path=candidate_lineups_path,
+            rg_candidate_lineups_path=rg_candidate_lineups_path,
+            etr_candidate_lineups_path=etr_candidate_lineups_path,
             h2h_path=h2h_path,
-            proj_path=proj_path,
+            rg_proj_path=rg_proj_path,
+            etr_proj_path=etr_proj_path,
             results_path=results_file,
         )
     summary_df = aggregate_results(slate_results)
