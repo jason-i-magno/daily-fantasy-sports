@@ -22,6 +22,7 @@ from typing import List, Set
 import pandas as pd
 from utils import (
     adjusted_score,
+    blend_projections,
     load_projection_csv,
     normalize_name,
     parse_filename,
@@ -546,12 +547,13 @@ def aggregate_results(results: List[SlateResult], opponent_results) -> pd.DataFr
 
 
 def evaluate_slate(
-    rg_candidate_lineups_path: Path,
+    blend_candidate_lineups_path: Path,
     etr_candidate_lineups_path: Path,
-    h2h_path: Path,
-    rg_proj_path: Path,
     etr_proj_path: Path,
+    h2h_path: Path,
     results_path: Path,
+    rg_candidate_lineups_path: Path,
+    rg_proj_path: Path,
     id_col: str = "player_key",
 ) -> pd.DataFrame:
     """
@@ -560,33 +562,46 @@ def evaluate_slate(
     """
     rg_proj, slate_games, _ = load_projection_csv(rg_proj_path, remove_nan=False)
     etr_proj, _, _ = load_projection_csv(etr_proj_path, remove_nan=False)
+    blend_proj = blend_projections(rg_proj, etr_proj)
     results = load_results_csv(results_path)
     rg_merged = join_proj_results(rg_proj, results, id_col=id_col)
     etr_merged = join_proj_results(etr_proj, results, id_col=id_col)
+    blend_merged = join_proj_results(blend_proj, results, id_col=id_col)
     rg_top_fpts_player_keys, rg_top_minutes_player_keys = load_candidate_lineups(
         rg_candidate_lineups_path
     )
     etr_top_fpts_player_keys, etr_top_minutes_player_keys = load_candidate_lineups(
         etr_candidate_lineups_path
     )
+    blend_top_fpts_player_keys, blend_top_minutes_player_keys = load_candidate_lineups(
+        blend_candidate_lineups_path
+    )
     h2h_results = load_h2h_results(h2h_path)
 
     # Candidate pool: top N by fpts and minutes, then dedupe by player set.
-    rg_top_fpts_lineups = [
-        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
-        for player_keys in rg_top_fpts_player_keys
+    blend_top_fpts_lineups = [
+        lineup_from_player_keys(blend_merged, player_keys, id_col=id_col)
+        for player_keys in blend_top_fpts_player_keys
+    ]
+    blend_top_minutes_lineups = [
+        lineup_from_player_keys(blend_merged, player_keys, id_col=id_col)
+        for player_keys in blend_top_minutes_player_keys
     ]
     etr_top_fpts_lineups = [
         lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
         for player_keys in etr_top_fpts_player_keys
     ]
-    rg_top_minutes_lineups = [
-        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
-        for player_keys in rg_top_minutes_player_keys
-    ]
     etr_top_minutes_lineups = [
         lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
         for player_keys in etr_top_minutes_player_keys
+    ]
+    rg_top_fpts_lineups = [
+        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
+        for player_keys in rg_top_fpts_player_keys
+    ]
+    rg_top_minutes_lineups = [
+        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
+        for player_keys in rg_top_minutes_player_keys
     ]
 
     h2h_lineup_1 = lineup_from_player_keys(
@@ -646,6 +661,15 @@ def evaluate_slate(
         proj_source="ETR",
     )
 
+    slate_results += evaluate_proj_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=blend_top_fpts_lineups,
+        top_minutes_lineups=blend_top_minutes_lineups,
+        baseline_proj=baseline_proj,
+        proj_source="BLEND",
+    )
+
     results, opponent_results = evaluate_h2h_lineups(
         slate_id=Path(rg_proj_path).stem,
         slate_games=slate_games,
@@ -674,9 +698,23 @@ def evaluate_slate(
         h2h_opponent_3=h2h_opponent_3,
         proj_source="ETR",
     )
-
     slate_results += results
     opponent_results += opp_results
+
+    results, _ = evaluate_h2h_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=blend_top_fpts_lineups,
+        baseline_proj=blend_top_fpts_lineups[0],
+        h2h_lineup_1=h2h_lineup_1,
+        h2h_lineup_2=h2h_lineup_2,
+        h2h_lineup_3=h2h_lineup_3,
+        h2h_opponent_1=h2h_opponent_1,
+        h2h_opponent_2=h2h_opponent_2,
+        h2h_opponent_3=h2h_opponent_3,
+        proj_source="BLEND",
+    )
+    slate_results += results
 
     return slate_results, opponent_results
 
@@ -684,12 +722,14 @@ def evaluate_slate(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     data_dir = Path("data")
-    rg_proj_dir = data_dir / "raw" / "rotogrinders"
+
+    blend_candidate_dir = data_dir / "candidate_lineups" / "blend"
+    etr_candidate_dir = data_dir / "candidate_lineups" / "etr"
     etr_proj_dir = data_dir / "raw" / "etr"
+    h2h_dir = data_dir / "processed" / "h2h"
     results_dir = data_dir / "raw" / "history"
     rg_candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
-    etr_candidate_dir = data_dir / "candidate_lineups" / "etr"
-    h2h_dir = data_dir / "processed" / "h2h"
+    rg_proj_dir = data_dir / "raw" / "rotogrinders"
 
     slate_results = []
     opponent_results = []
@@ -700,33 +740,38 @@ if __name__ == "__main__":
 
         if meta.sport != "nba":
             continue
-        rg_proj_path = (
-            rg_proj_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
-        )
-        etr_proj_path = (
-            etr_proj_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
-        )
-        rg_candidate_lineups_path = (
-            rg_candidate_dir
+        blend_candidate_lineups_path = (
+            blend_candidate_dir
             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
         )
         etr_candidate_lineups_path = (
             etr_candidate_dir
             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
         )
+        etr_proj_path = (
+            etr_proj_dir
+            / f"{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
+        )
         h2h_path = (
             h2h_dir / f"{meta.sport}_{meta.slate}_{meta.site}_h2h_{meta.date}.json"
         )
+        rg_proj_path = (
+            rg_proj_dir
+            / f"{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
+        )
+        rg_candidate_lineups_path = (
+            rg_candidate_dir
+            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+        )
 
         results, opp_results = evaluate_slate(
-            rg_candidate_lineups_path=rg_candidate_lineups_path,
+            blend_candidate_lineups_path=blend_candidate_lineups_path,
             etr_candidate_lineups_path=etr_candidate_lineups_path,
-            h2h_path=h2h_path,
-            rg_proj_path=rg_proj_path,
             etr_proj_path=etr_proj_path,
+            h2h_path=h2h_path,
             results_path=results_file,
+            rg_candidate_lineups_path=rg_candidate_lineups_path,
+            rg_proj_path=rg_proj_path,
         )
 
         slate_results += results

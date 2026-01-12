@@ -22,6 +22,7 @@ import pulp
 from utils import (
     ResultsFileMeta,
     adjusted_score,
+    blend_projections,
     load_projection_csv,
     normalize_name,
     parse_slate_id,
@@ -243,7 +244,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "-p",
         "--projection-source",
         type=str,
-        choices=["etr", "rg"],
+        choices=["blend", "etr", "rg"],
         required=True,
         help="Source of projection data.",
     )
@@ -315,10 +316,17 @@ def main(argv: Iterable[str]) -> int:
     print(f"{extra_etr_players=}")
 
     # Players in RG but missing from ETR
-    missing_etr_players = set(rg_df["player_key"]) - set(etr_slate_df["player_key"])
-    print(f"{missing_etr_players=}")
+    missing_rg_players = set(rg_df["player_key"]) - set(etr_slate_df["player_key"])
+    print(f"{missing_rg_players=}")
 
-    df = rg_df if args.projection_source == "rg" else etr_slate_df
+    blend = blend_projections(rg_df, etr_slate_df)
+
+    if args.projection_source == "rg":
+        df = rg_df
+    elif args.projection_source == "etr":
+        df = etr_slate_df
+    elif args.projection_source == "blend":
+        df = blend
 
     # Generate top k maximum minutes lineups
     max_minutes_lineups = solve_top_k_lineups(
@@ -370,9 +378,16 @@ def main(argv: Iterable[str]) -> int:
         lineup_df_to_player_keys(lu["lineup"]) for lu in max_minutes_lineups
     ]
 
+    if args.projection_source == "rg":
+        candidate_subdir = "rotogrinders"
+    elif args.projection_source == "etr":
+        candidate_subdir = "etr"
+    elif args.projection_source == "blend":
+        candidate_subdir = "blend"
+
     if args.write_candidate_lineups:
         write_lineups_to_file(
-            out_dir=f"data/candidate_lineups/{'rotogrinders' if args.projection_source == 'rg' else 'etr'}",
+            out_dir=f"data/candidate_lineups/{candidate_subdir}",
             meta=meta,
             slate_size=slate_games,
             proj_source=args.projection_source,

@@ -118,6 +118,43 @@ def adjusted_score(proj_fpts, proj_minutes, tfm, games):
     )
 
 
+def blend_projections(
+    rg_df: pd.DataFrame,
+    etr_df: pd.DataFrame,
+    weight_rg: float = 0.4,
+    weight_etr: float = 0.6,
+) -> pd.DataFrame:
+    rg = rg_df.rename(
+        columns={
+            "proj_fpts": "rg_fpts",
+            "proj_minutes": "rg_minutes",
+        }
+    )
+
+    etr = etr_df.rename(
+        columns={
+            "proj_fpts": "etr_fpts",
+            "proj_minutes": "etr_minutes",
+        }
+    )
+
+    # 2. Merge on player_name (inner join ensures both sites project the player)
+    blend = rg.merge(etr, on="player_name", how="inner")
+
+    # 3. Create blended + min columns
+    blend["proj_fpts"] = weight_rg * blend["rg_fpts"] + weight_etr * blend["etr_fpts"]
+
+    blend["proj_minutes"] = blend[["rg_minutes", "etr_minutes"]].min(axis=1)
+    blend["ceiling"] = blend["ceiling_x"]
+    blend["player_key"] = blend["player_key_x"]
+    blend["position"] = blend["position_x"]
+    blend["positions"] = blend["positions_x"]
+    blend["salary"] = blend["salary_x"]
+    blend["team"] = blend["team_x"]
+
+    return blend
+
+
 def coerce_numeric(series: pd.Series) -> pd.Series:
     """Convert to numeric, stripping currency/commas where present."""
     cleaned = series.replace(r"[\\$,]", "", regex=True)
