@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pulp
@@ -23,6 +24,7 @@ from utils import (
     ResultsFileMeta,
     adjusted_score,
     blend_projections,
+    load_dk_salaries_csv,
     load_projection_csv,
     normalize_name,
     parse_slate_id,
@@ -110,10 +112,22 @@ SLOTS: List[Dict] = [
     {"name": "UTIL", "allowed": None},
 ]
 
+slot_index = {
+    "PG": 0,
+    "SG": 1,
+    "SF": 2,
+    "PF": 3,
+    "C": 4,
+    "G": 5,
+    "F": 6,
+    "UTIL": 7,
+}
+
 
 def build_ilp_with_slots(
     df: pd.DataFrame,
     maximize_fpts: bool = False,
+    locked_assignments: dict[int, int] | None = None,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
@@ -170,6 +184,19 @@ def build_ilp_with_slots(
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
 
+    # ------------------------------
+    # Lock specific players into slots
+    # ------------------------------
+    if locked_assignments:
+        for player_idx, slot_idx in locked_assignments.items():
+            # Force the chosen player into the chosen slot
+            prob += y[(player_idx, slot_idx)] == 1
+
+            # Prevent that same player from appearing in any other slot
+            for other_s in range(n_slots):
+                if other_s != slot_idx:
+                    prob += y[(player_idx, other_s)] == 0
+
     # Force top projected scorer(s) into the lineup
     # top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
     # for top_fpts_id in top_fpts_ids:
@@ -199,8 +226,11 @@ def solve_top_k_lineups(
     cols: list[str],
     k: int = 10,
     maximize_fpts: bool = False,
+    locked_assignments: dict[int, int] | None = None,
 ):
-    prob, y = build_ilp_with_slots(df, maximize_fpts=maximize_fpts)
+    prob, y = build_ilp_with_slots(
+        df, maximize_fpts=maximize_fpts, locked_assignments=locked_assignments
+    )
 
     lineups = []
     chosen_players = set()
@@ -293,8 +323,22 @@ def main(argv: Iterable[str]) -> int:
 
         return 1
 
+    dk_salaries_path = Path(
+        f"data/raw/draftkings/{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.date}.csv"
+    )
+
+    if not dk_salaries_path.is_file():
+        logging.error(f"DK salaries file not found '{dk_salaries_path}'")
+
+        return 1
+
     rg_df, slate_games, cols = load_projection_csv(rg_proj_path)
     etr_df, slate_games, cols = load_projection_csv(etr_proj_path, remove_nan=False)
+    dk_df = load_dk_salaries_csv(dk_salaries_path)
+
+    dk_subset = dk_df[["player_key", "game_time_local"]].copy()
+
+    rg_df = rg_df.merge(dk_subset, on="player_key", how="left")
 
     etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
 
@@ -310,6 +354,7 @@ def main(argv: Iterable[str]) -> int:
         etr_slate_df["salary"]
     )
     etr_slate_df = etr_slate_df.drop(columns=["rg_salary"])
+    etr_slate_df = etr_slate_df.merge(dk_subset, on="player_key", how="left")
 
     # Players in ETR but not RG (still on slate teams)
     extra_etr_players = set(etr_slate_df["player_key"]) - set(rg_df["player_key"])
@@ -328,12 +373,25 @@ def main(argv: Iterable[str]) -> int:
     elif args.projection_source == "blend":
         df = blend
 
+    locked = {}
+
+    if locked:
+        now_mt = datetime.now(ZoneInfo("America/Denver"))
+        df = df[df["game_time_local"] > now_mt].reset_index(drop=True)
+
+    locked_assignments = {}
+    for player_key, position in locked.items():
+        locked_assignments[df.index[df["player_key"] == player_key][0]] = slot_index[
+            position
+        ]
+
     # Generate top k maximum minutes lineups
     max_minutes_lineups = solve_top_k_lineups(
         df,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=False,
+        locked_assignments=locked_assignments,
     )
 
     # Generate top k maximum FPTs lineus
@@ -342,17 +400,25 @@ def main(argv: Iterable[str]) -> int:
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True,
+        locked_assignments=locked_assignments,
     )
 
     # Generate top k adjusted lineups
     # Disallow any player under minutes floor.
     df = df[df["proj_minutes"] >= 22].reset_index(drop=True)
 
+    locked_assignments = {}
+    for player_key, position in locked.items():
+        locked_assignments[df.index[df["player_key"] == player_key][0]] = slot_index[
+            position
+        ]
+
     adjusted_lineups = solve_top_k_lineups(
         df,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True if args.maximize_fpts else False,
+        locked_assignments=locked_assignments,
     )
 
     for lu in adjusted_lineups:

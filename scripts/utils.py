@@ -8,14 +8,16 @@ import dataclasses
 import math
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Set, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 # Canonical column names and common aliases found in provider exports.
 COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "player_name": ("player_name", "player", "name", "PLAYER", "DKName"),
+    "player_name": ("player_name", "player", "name", "Name", "PLAYER", "DKName"),
     "salary": ("salary", "Salary", "SALARY"),
     "proj_minutes": ("projected_minutes", "minutes", "Minutes", "MINUTES"),
     "proj_fpts": ("projected_fpts", "FPTS", "fpts"),
@@ -25,12 +27,12 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "pos",
         "Pos",
         "POS",
-        "ROSTER POSITION",
-        "Roster Position",
+        "Position",
     ),
     "ceiling": ("ceiling", "Ceiling", "CEILING", "ceil", "Ceil", "CEIL"),
     "floor": ("floor", "Floor", "FLOOR"),
-    "team": ("team", "Team", "TEAM"),
+    "team": ("team", "Team", "TEAM", "TeamAbbrev"),
+    "game_info": {"Game Info"},
 }
 
 _FILENAME_RE = re.compile(
@@ -167,6 +169,31 @@ def ensure_output_path(path_str: str) -> Path:
     return path
 
 
+def load_dk_salaries_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
+    cols = [
+        "player_name",
+        "salary",
+        "position",
+        "team",
+        "game_info",
+    ]
+    df = pd.read_csv(path)
+
+    df = normalize_columns(
+        df,
+        required=["player_name", "salary", "position", "team", "game_info"],
+    )
+    df = df[cols].copy()
+    df["salary"] = coerce_numeric(df["salary"])
+    df["positions"] = df["position"].map(parse_positions)
+    df["player_key"] = df["player_name"].map(normalize_name)
+    df["game_time_local"] = df["game_info"].apply(parse_game_time)
+
+    df = df[df["positions"].map(bool)]
+
+    return df.reset_index(drop=True)
+
+
 def load_projection_csv(
     path: Path, remove_nan: bool = True
 ) -> tuple[pd.DataFrame, int, list[str]]:
@@ -298,6 +325,30 @@ def parse_filename(path: str | Path) -> ResultsFileMeta:
         date=parts["date"],
         slate_id=slate_id,
     )
+
+
+ET = ZoneInfo("America/New_York")
+MT = ZoneInfo("America/Denver")
+
+
+def parse_game_time(game_info: str) -> datetime:
+    """
+    Extracts a timezone-aware Eastern Time datetime from DK Game Info.
+    Example: 'LAL@SAC 01/12/2026 10:00PM ET'
+    """
+
+    # Extract the MM/DD/YYYY and HH:MM(AM/PM)
+    m = re.search(r"(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2}[AP]M)", game_info)
+    if not m:
+        return None
+
+    date_str, time_str = m.group(1), m.group(2)
+    combined = f"{date_str} {time_str}"
+
+    dt_naive = datetime.strptime(combined, "%m/%d/%Y %I:%M%p")
+    dt_et = dt_naive.replace(tzinfo=ET)
+
+    return dt_et.astimezone(MT)
 
 
 def parse_positions(raw: str) -> Set[str]:
