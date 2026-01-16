@@ -300,16 +300,22 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Iterable[str]) -> int:
-    args = parse_args(argv)
-    meta = parse_slate_id(args.slate_id)
+def generate_lineups(
+    slate_id: str,
+    projection_source: str,
+    k_lineups: int,
+    maximize_fpts: bool = True,
+    write_candidate_lineups: bool = True,
+    output_file: str = "data/processed/dk_max_minutes_lineup.csv",
+):
+    meta = parse_slate_id(slate_id)
     print(meta.id)
 
     etr_proj_path = Path(
         f"data/raw/etr/{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
     )
 
-    if args.projection_source == "etr" and not etr_proj_path.is_file():
+    if projection_source == "etr" and not etr_proj_path.is_file():
         logging.error(f"ETR projection file not found '{etr_proj_path}'")
 
         return 1
@@ -383,11 +389,11 @@ def main(argv: Iterable[str]) -> int:
 
     blend = blend_projections(rg_df, etr_slate_df)
 
-    if args.projection_source == "rg":
+    if projection_source == "rg":
         df = rg_df
-    elif args.projection_source == "etr":
+    elif projection_source == "etr":
         df = etr_slate_df
-    elif args.projection_source == "blend":
+    elif projection_source == "blend":
         df = blend
     locked = {}
     locked_keys = set(locked.keys())
@@ -409,7 +415,7 @@ def main(argv: Iterable[str]) -> int:
     max_minutes_lineups = solve_top_k_lineups(
         working_df,
         cols=cols,
-        k=args.k_lineups,
+        k=k_lineups,
         maximize_fpts=False,
         locked_assignments=locked_assignments,
     )
@@ -418,7 +424,7 @@ def main(argv: Iterable[str]) -> int:
     max_fpts_lineups = solve_top_k_lineups(
         working_df,
         cols=cols,
-        k=args.k_lineups,
+        k=k_lineups,
         maximize_fpts=True,
         locked_assignments=locked_assignments,
     )
@@ -436,8 +442,8 @@ def main(argv: Iterable[str]) -> int:
     adjusted_lineups = solve_top_k_lineups(
         working_df,
         cols=cols,
-        k=args.k_lineups,
-        maximize_fpts=True if args.maximize_fpts else False,
+        k=k_lineups,
+        maximize_fpts=True if maximize_fpts else False,
         locked_assignments=locked_assignments,
     )
 
@@ -464,19 +470,19 @@ def main(argv: Iterable[str]) -> int:
         lineup_df_to_player_keys(lu["lineup"]) for lu in max_minutes_lineups
     ]
 
-    if args.projection_source == "rg":
+    if projection_source == "rg":
         candidate_subdir = "rotogrinders"
-    elif args.projection_source == "etr":
+    elif projection_source == "etr":
         candidate_subdir = "etr"
-    elif args.projection_source == "blend":
+    elif projection_source == "blend":
         candidate_subdir = "blend"
 
-    if args.write_candidate_lineups:
+    if write_candidate_lineups:
         write_lineups_to_file(
             out_dir=f"data/candidate_lineups/{candidate_subdir}",
             meta=meta,
             slate_size=slate_games,
-            proj_source=args.projection_source,
+            proj_source=projection_source,
             top_fpts_player_keys=top_fpts_player_keys,
             top_minutes_player_keys=top_minutes_player_keys,
         )
@@ -486,7 +492,7 @@ def main(argv: Iterable[str]) -> int:
     max_ceil = 0
     max_floor = 0
 
-    with open(args.output, "w") as out_file:
+    with open(output_file, "w") as out_file:
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup ")
         write_lineup(max_minutes_lineups[0]["lineup"], cols, out_file)
@@ -506,6 +512,18 @@ def main(argv: Iterable[str]) -> int:
 
             if "floor" in cols:
                 max_floor = max(max_floor, lineup["lineup"]["floor"].sum())
+
+
+def main(argv: Iterable[str]) -> int:
+    args = parse_args(argv)
+    generate_lineups(
+        slate_id=args.slate_id,
+        projection_source=args.projection_source,
+        k_lineups=args.k_lineups,
+        maximize_fpts=args.maximize_fpts,
+        write_candidate_lineups=args.write_candidate_lineups,
+        output_file=args.output,
+    )
 
     return 0
 
