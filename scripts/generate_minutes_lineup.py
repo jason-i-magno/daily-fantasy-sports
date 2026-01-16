@@ -13,7 +13,7 @@ import io
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
 from zoneinfo import ZoneInfo
@@ -338,22 +338,39 @@ def main(argv: Iterable[str]) -> int:
 
     dk_subset = dk_df[["player_key", "game_time_local"]].copy()
 
-    rg_df = rg_df.merge(dk_subset, on="player_key", how="left")
-
     etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
 
-    rg_salary_lookup = rg_df[["player_key", "salary"]].rename(
-        columns={"salary": "rg_salary"}
-    )
+    # Replace ETR position column with DK position
+    pos_lookup = dk_df[["player_key", "position"]]
     etr_slate_df = etr_slate_df.merge(
-        rg_salary_lookup,
-        on="player_key",
-        how="left",
+        pos_lookup, on="player_key", how="left", suffixes=("", "_dk")
     )
-    etr_slate_df["salary"] = etr_slate_df["rg_salary"].combine_first(
-        etr_slate_df["salary"]
+    etr_slate_df["position"] = etr_slate_df["position_dk"]
+    etr_slate_df = etr_slate_df.drop(columns=["position_dk"])
+
+    # Replace RG position column with DK position
+    pos_lookup = dk_df[["player_key", "position"]]
+    rg_df = rg_df.merge(pos_lookup, on="player_key", how="left", suffixes=("", "_dk"))
+    rg_df["position"] = rg_df["position_dk"]
+    rg_df = rg_df.drop(columns=["position_dk"])
+
+    # Replace ETR salary column with DK salary
+    salary_lookup = dk_df[["player_key", "salary"]]
+    etr_slate_df = etr_slate_df.merge(
+        salary_lookup, on="player_key", how="left", suffixes=("", "_dk")
     )
-    etr_slate_df = etr_slate_df.drop(columns=["rg_salary"])
+    etr_slate_df["salary"] = etr_slate_df["salary_dk"]
+    etr_slate_df = etr_slate_df.drop(columns=["salary_dk"])
+
+    # Replace RG salary column with DK salary
+    rg_df = rg_df.merge(
+        salary_lookup, on="player_key", how="left", suffixes=("", "_dk")
+    )
+    rg_df["salary"] = rg_df["salary_dk"]
+    rg_df = rg_df.drop(columns=["salary_dk"])
+
+    # Merge in local game time column
+    rg_df = rg_df.merge(dk_subset, on="player_key", how="left")
     etr_slate_df = etr_slate_df.merge(dk_subset, on="player_key", how="left")
 
     # Players in ETR but not RG (still on slate teams)
@@ -372,22 +389,25 @@ def main(argv: Iterable[str]) -> int:
         df = etr_slate_df
     elif args.projection_source == "blend":
         df = blend
-
     locked = {}
-
+    locked_keys = set(locked.keys())
+    working_df = df
     if locked:
         now_mt = datetime.now(ZoneInfo("America/Denver"))
-        df = df[df["game_time_local"] > now_mt].reset_index(drop=True)
+        working_df = df[
+            (df["player_key"].isin(locked_keys))
+            | (df["game_time_local"] > now_mt - timedelta(minutes=0))
+        ].reset_index(drop=True)
 
     locked_assignments = {}
     for player_key, position in locked.items():
-        locked_assignments[df.index[df["player_key"] == player_key][0]] = slot_index[
-            position
-        ]
+        locked_assignments[
+            working_df.index[working_df["player_key"] == player_key][0]
+        ] = slot_index[position]
 
     # Generate top k maximum minutes lineups
     max_minutes_lineups = solve_top_k_lineups(
-        df,
+        working_df,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=False,
@@ -396,7 +416,7 @@ def main(argv: Iterable[str]) -> int:
 
     # Generate top k maximum FPTs lineus
     max_fpts_lineups = solve_top_k_lineups(
-        df,
+        working_df,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True,
@@ -405,16 +425,16 @@ def main(argv: Iterable[str]) -> int:
 
     # Generate top k adjusted lineups
     # Disallow any player under minutes floor.
-    df = df[df["proj_minutes"] >= 22].reset_index(drop=True)
+    working_df = working_df[working_df["proj_minutes"] >= 22].reset_index(drop=True)
 
     locked_assignments = {}
     for player_key, position in locked.items():
-        locked_assignments[df.index[df["player_key"] == player_key][0]] = slot_index[
-            position
-        ]
+        locked_assignments[
+            working_df.index[working_df["player_key"] == player_key][0]
+        ] = slot_index[position]
 
     adjusted_lineups = solve_top_k_lineups(
-        df,
+        working_df,
         cols=cols,
         k=args.k_lineups,
         maximize_fpts=True if args.maximize_fpts else False,
