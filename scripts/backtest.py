@@ -120,15 +120,41 @@ def load_results_csv(path: str) -> pd.DataFrame:
     """
     Load post-slate results. Expected columns: id_col, actual_fpts.
     """
-    df = pd.read_csv(path)
-    required = {"Player", "FPTS"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Results file missing columns: {missing}")
+    raw = pd.read_csv(path, dtype=str)
 
-    df["player_key"] = df["Player"].map(normalize_name)
+    entries = []
+    players = []
 
-    return df
+    for _, row in raw.iterrows():
+        rank = row["Rank"]
+
+        if pd.notna(rank) and rank.isdigit():
+            entries.append(
+                {
+                    "Rank": int(row["Rank"]),
+                    "EntryId": row["EntryId"],
+                    "EntryName": row["EntryName"],
+                    "TimeRemaining": row["TimeRemaining"],
+                    "Points": float(row["Points"]),
+                    "Lineup": row["Lineup"],
+                }
+            )
+
+        if pd.notna(row["Player"]):
+            players.append(
+                {
+                    "player_key": normalize_name(row["Player"]),
+                    "Player": row["Player"],
+                    "RosterPosition": row["Roster Position"],
+                    "DraftedPct": row["%Drafted"],
+                    "FPTS": float(row["FPTS"]),
+                }
+            )
+
+    entries_df = pd.DataFrame(entries)
+    players_df = pd.DataFrame(players)
+
+    return entries_df, players_df
 
 
 def lineup_from_player_keys(
@@ -306,6 +332,8 @@ def evaluate_h2h_lineups(
 ) -> List[SlateResult]:
     results: List[SlateResult] = []
     opponent_results = []
+    adjusted_fragile_wins = 0
+    max_fpts_wins = 0
 
     top_10_fpts_lineups = top_fpts_lineups[:10]
     actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
@@ -338,6 +366,7 @@ def evaluate_h2h_lineups(
     )
     results.append(slate_result)
     opponent_results.append(opponent_result)
+    adjusted_fragile_wins += 1 - slate_result.win
 
     # Opponent H2H $2 vs Adjusted Fragile
     slate_result, opponent_result = get_slate_result(
@@ -353,6 +382,7 @@ def evaluate_h2h_lineups(
     results.append(slate_result)
     if h2h_opponent_2 != h2h_opponent_1:
         opponent_results.append(opponent_result)
+    adjusted_fragile_wins += 1 - slate_result.win
 
     # Opponent H2H $3 vs Adjusted Fragile
     slate_result, opponent_result = get_slate_result(
@@ -368,6 +398,7 @@ def evaluate_h2h_lineups(
     results.append(slate_result)
     if h2h_opponent_3 != h2h_opponent_2 and h2h_opponent_3 != h2h_opponent_1:
         opponent_results.append(opponent_result)
+    adjusted_fragile_wins += 1 - slate_result.win
 
     # Opponent H2H $1 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -381,6 +412,7 @@ def evaluate_h2h_lineups(
         opponent=h2h_opponent_1,
     )
     results.append(slate_result)
+    max_fpts_wins += 1 - slate_result.win
 
     # Opponent H2H $2 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -394,6 +426,7 @@ def evaluate_h2h_lineups(
         opponent=h2h_opponent_2,
     )
     results.append(slate_result)
+    max_fpts_wins += 1 - slate_result.win
 
     # Opponent H2H $3 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -407,8 +440,12 @@ def evaluate_h2h_lineups(
         opponent=h2h_opponent_3,
     )
     results.append(slate_result)
+    max_fpts_wins += 1 - slate_result.win
 
-    return results, opponent_results
+    adjusted_fragile_win_rate = adjusted_fragile_wins / 3
+    max_fpts_win_rate = max_fpts_wins / 3
+
+    return results, opponent_results, adjusted_fragile_win_rate, max_fpts_win_rate
 
 
 def get_slate_result(
@@ -563,10 +600,10 @@ def evaluate_slate(
     rg_proj, slate_games, _ = load_projection_csv(rg_proj_path, remove_nan=False)
     etr_proj, _, _ = load_projection_csv(etr_proj_path, remove_nan=False)
     blend_proj = blend_projections(rg_proj, etr_proj)
-    results = load_results_csv(results_path)
-    rg_merged = join_proj_results(rg_proj, results, id_col=id_col)
-    etr_merged = join_proj_results(etr_proj, results, id_col=id_col)
-    blend_merged = join_proj_results(blend_proj, results, id_col=id_col)
+    _, results_players_df = load_results_csv(results_path)
+    rg_merged = join_proj_results(rg_proj, results_players_df, id_col=id_col)
+    etr_merged = join_proj_results(etr_proj, results_players_df, id_col=id_col)
+    blend_merged = join_proj_results(blend_proj, results_players_df, id_col=id_col)
     rg_top_fpts_player_keys, rg_top_minutes_player_keys = load_candidate_lineups(
         rg_candidate_lineups_path
     )
@@ -670,38 +707,48 @@ def evaluate_slate(
         proj_source="BLEND",
     )
 
-    results, opponent_results = evaluate_h2h_lineups(
-        slate_id=Path(rg_proj_path).stem,
-        slate_games=slate_games,
-        top_fpts_lineups=rg_top_fpts_lineups,
-        baseline_proj=baseline_proj,
-        h2h_lineup_1=h2h_lineup_1,
-        h2h_lineup_2=h2h_lineup_2,
-        h2h_lineup_3=h2h_lineup_3,
-        h2h_opponent_1=h2h_opponent_1,
-        h2h_opponent_2=h2h_opponent_2,
-        h2h_opponent_3=h2h_opponent_3,
-        proj_source="RG",
+    win_rates = {}
+
+    results, opponent_results, adjusted_fragile_win_rate, max_fpts_win_rate = (
+        evaluate_h2h_lineups(
+            slate_id=Path(rg_proj_path).stem,
+            slate_games=slate_games,
+            top_fpts_lineups=rg_top_fpts_lineups,
+            baseline_proj=baseline_proj,
+            h2h_lineup_1=h2h_lineup_1,
+            h2h_lineup_2=h2h_lineup_2,
+            h2h_lineup_3=h2h_lineup_3,
+            h2h_opponent_1=h2h_opponent_1,
+            h2h_opponent_2=h2h_opponent_2,
+            h2h_opponent_3=h2h_opponent_3,
+            proj_source="RG",
+        )
     )
     slate_results += results
+    win_rates["rg_adjusted_fragile"] = adjusted_fragile_win_rate
+    win_rates["rg_max_fpts"] = max_fpts_win_rate
 
-    results, opp_results = evaluate_h2h_lineups(
-        slate_id=Path(rg_proj_path).stem,
-        slate_games=slate_games,
-        top_fpts_lineups=etr_top_fpts_lineups,
-        baseline_proj=etr_top_fpts_lineups[0],
-        h2h_lineup_1=h2h_lineup_1,
-        h2h_lineup_2=h2h_lineup_2,
-        h2h_lineup_3=h2h_lineup_3,
-        h2h_opponent_1=h2h_opponent_1,
-        h2h_opponent_2=h2h_opponent_2,
-        h2h_opponent_3=h2h_opponent_3,
-        proj_source="ETR",
+    results, opp_results, adjusted_fragile_win_rate, max_fpts_win_rate = (
+        evaluate_h2h_lineups(
+            slate_id=Path(rg_proj_path).stem,
+            slate_games=slate_games,
+            top_fpts_lineups=etr_top_fpts_lineups,
+            baseline_proj=etr_top_fpts_lineups[0],
+            h2h_lineup_1=h2h_lineup_1,
+            h2h_lineup_2=h2h_lineup_2,
+            h2h_lineup_3=h2h_lineup_3,
+            h2h_opponent_1=h2h_opponent_1,
+            h2h_opponent_2=h2h_opponent_2,
+            h2h_opponent_3=h2h_opponent_3,
+            proj_source="ETR",
+        )
     )
     slate_results += results
     opponent_results += opp_results
+    win_rates["etr_adjusted_fragile"] = adjusted_fragile_win_rate
+    win_rates["etr_max_fpts"] = max_fpts_win_rate
 
-    results, _ = evaluate_h2h_lineups(
+    results, _, adjusted_fragile_win_rate, max_fpts_win_rate = evaluate_h2h_lineups(
         slate_id=Path(rg_proj_path).stem,
         slate_games=slate_games,
         top_fpts_lineups=blend_top_fpts_lineups,
@@ -715,8 +762,10 @@ def evaluate_slate(
         proj_source="BLEND",
     )
     slate_results += results
+    win_rates["blend_adjusted_fragile"] = adjusted_fragile_win_rate
+    win_rates["blend_max_fpts"] = max_fpts_win_rate
 
-    return slate_results, opponent_results
+    return slate_results, opponent_results, win_rates
 
 
 if __name__ == "__main__":
@@ -731,51 +780,98 @@ if __name__ == "__main__":
     rg_candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
     rg_proj_dir = data_dir / "raw" / "rotogrinders"
 
-    slate_results = []
-    opponent_results = []
+    slates = []
 
     for results_file in results_dir.iterdir():
+        if not results_file.is_file():
+            continue
+
         meta = parse_filename(results_file.stem)
-        print(meta.slate_id)
 
         if meta.sport != "nba":
             continue
+
+        slates.append(meta)
+
+    n_slates = len(slates)
+
+    slates.sort(key=lambda x: x.date)
+
+    slate_results = []
+    opponent_results = []
+    win_rates = {
+        "blend_adjusted_fragile": 0,
+        "blend_max_fpts": 0,
+        "etr_adjusted_fragile": 0,
+        "etr_max_fpts": 0,
+        "rg_adjusted_fragile": 0,
+        "rg_max_fpts": 0,
+    }
+
+    for i, slate in enumerate(slates):
+        logging.info(f"[{i + 1}/{n_slates}] {slate.slate_id}")
+
         blend_candidate_lineups_path = (
             blend_candidate_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+            / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
         etr_candidate_lineups_path = (
             etr_candidate_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+            / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
         etr_proj_path = (
             etr_proj_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
+            / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.date}.csv"
         )
         h2h_path = (
-            h2h_dir / f"{meta.sport}_{meta.slate}_{meta.site}_h2h_{meta.date}.json"
+            h2h_dir / f"{slate.sport}_{slate.slate}_{slate.site}_h2h_{slate.date}.json"
         )
         rg_proj_path = (
             rg_proj_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
+            / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.date}.csv"
         )
         rg_candidate_lineups_path = (
             rg_candidate_dir
-            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+            / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
+        )
+        results_path = (
+            results_dir
+            / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.date}.csv"
         )
 
-        results, opp_results = evaluate_slate(
+        results, opp_results, slate_win_rates = evaluate_slate(
             blend_candidate_lineups_path=blend_candidate_lineups_path,
             etr_candidate_lineups_path=etr_candidate_lineups_path,
             etr_proj_path=etr_proj_path,
             h2h_path=h2h_path,
-            results_path=results_file,
+            results_path=results_path,
             rg_candidate_lineups_path=rg_candidate_lineups_path,
             rg_proj_path=rg_proj_path,
         )
 
         slate_results += results
         opponent_results += opp_results
+        win_rates["blend_adjusted_fragile"] += slate_win_rates["blend_adjusted_fragile"]
+        win_rates["blend_max_fpts"] += slate_win_rates["blend_max_fpts"]
+        win_rates["etr_adjusted_fragile"] += slate_win_rates["etr_adjusted_fragile"]
+        win_rates["etr_max_fpts"] += slate_win_rates["etr_max_fpts"]
+        win_rates["rg_adjusted_fragile"] += slate_win_rates["rg_adjusted_fragile"]
+        win_rates["rg_max_fpts"] += slate_win_rates["rg_max_fpts"]
+
+    win_rates["blend_adjusted_fragile"] = round(
+        win_rates["blend_adjusted_fragile"] / n_slates, 3
+    )
+    win_rates["blend_max_fpts"] = round(win_rates["blend_max_fpts"] / n_slates, 3)
+    win_rates["etr_adjusted_fragile"] = round(
+        win_rates["etr_adjusted_fragile"] / n_slates, 3
+    )
+    win_rates["etr_max_fpts"] = round(win_rates["etr_max_fpts"] / n_slates, 3)
+    win_rates["rg_adjusted_fragile"] = round(
+        win_rates["rg_adjusted_fragile"] / n_slates, 3
+    )
+    win_rates["rg_max_fpts"] = round(win_rates["rg_max_fpts"] / n_slates, 3)
+
+    print(f"{win_rates=}")
 
     summary_df, opponents_df = aggregate_results(slate_results, opponent_results)
     summary_df.to_csv("data/processed/backtest.csv")

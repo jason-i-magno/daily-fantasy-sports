@@ -1,6 +1,6 @@
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from generate_minutes_lineup import (
@@ -22,6 +22,7 @@ if __name__ == "__main__":
     etr_candidate_dir = candidate_lineups_dir / "etr"
     etr_output_dir = processed_lineups_dir / "etr"
     etr_proj_dir = raw_lineups_dir / "etr"
+    dk_salaries_dir = raw_lineups_dir / "draftkings"
     results_dir = raw_lineups_dir / "history"
     rg_candidate_dir = candidate_lineups_dir / "rotogrinders"
     rg_output_dir = processed_lineups_dir / "rotogrinders"
@@ -46,6 +47,14 @@ if __name__ == "__main__":
 
     for i, slate in enumerate(slates):
         logging.info(f"[{i + 1}/{n_slates}] {slate.slate_id}")
+
+        dk_salaries_path = (
+            dk_salaries_dir
+            / f"{slate.sport}_{slate.slate}_{slate.site}_salaries_{slate.date}.csv"
+        )
+
+        if not dk_salaries_path.exists():
+            logging.warning(f"Missing DK salaries file for slate {slate.slate_id}")
 
         etr_candidates_path = (
             etr_candidate_dir
@@ -93,11 +102,11 @@ if __name__ == "__main__":
                 blend_candidates_path.stat().st_mtime
             )
 
-            if datetime.now() - last_modified > timedelta(days=1):
-                logging.info(
-                    f"BLEND candidate lineups are more than a day old for slate {slate.slate_id}"
-                )
-                generate_blend_candidates = True
+            # if datetime.now() - last_modified > timedelta(days=1):
+            #     logging.info(
+            #         f"BLEND candidate lineups are more than a day old for slate {slate.slate_id}"
+            #     )
+            #     generate_blend_candidates = True
         else:
             logging.info(f"Missing BLEND candidate lineups for slate {slate.slate_id}")
 
@@ -123,11 +132,11 @@ if __name__ == "__main__":
         if etr_candidates_path.exists():
             last_modified = datetime.fromtimestamp(etr_candidates_path.stat().st_mtime)
 
-            if datetime.now() - last_modified > timedelta(days=1):
-                logging.info(
-                    f"ETR candidate lineups are more than a day old for slate {slate.slate_id}"
-                )
-                generate_etr_candidates = True
+            # if datetime.now() - last_modified > timedelta(days=1):
+            #     logging.info(
+            #         f"ETR candidate lineups are more than a day old for slate {slate.slate_id}"
+            #     )
+            #     generate_etr_candidates = True
         else:
             logging.info(f"Missing BLEND candidate lineups for slate {slate.slate_id}")
 
@@ -153,11 +162,11 @@ if __name__ == "__main__":
         if rg_candidates_path.exists():
             last_modified = datetime.fromtimestamp(rg_candidates_path.stat().st_mtime)
 
-            if datetime.now() - last_modified > timedelta(days=1):
-                logging.info(
-                    f"RG candidate lineups are more than a day old for slate {slate.slate_id}"
-                )
-                generate_rg_candidates = True
+            # if datetime.now() - last_modified > timedelta(days=1):
+            #     logging.info(
+            #         f"RG candidate lineups are more than a day old for slate {slate.slate_id}"
+            #     )
+            #     generate_rg_candidates = True
         else:
             logging.info(f"Missing BLEND candidate lineups for slate {slate.slate_id}")
 

@@ -346,6 +346,21 @@ def generate_lineups(
 
     etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
 
+    # Replace ETR positions column with DK positions
+    positions_lookup = dk_df[["player_key", "positions"]]
+    etr_slate_df = etr_slate_df.merge(
+        positions_lookup, on="player_key", how="left", suffixes=("", "_dk")
+    )
+    etr_slate_df["positions"] = etr_slate_df["positions_dk"]
+    etr_slate_df = etr_slate_df.drop(columns=["positions_dk"])
+
+    # Replace RG positions column with DK positions
+    rg_df = rg_df.merge(
+        positions_lookup, on="player_key", how="left", suffixes=("", "_dk")
+    )
+    rg_df["positions"] = rg_df["positions_dk"]
+    rg_df = rg_df.drop(columns=["positions_dk"])
+
     # Replace ETR position column with DK position
     pos_lookup = dk_df[["player_key", "position"]]
     etr_slate_df = etr_slate_df.merge(
@@ -355,7 +370,6 @@ def generate_lineups(
     etr_slate_df = etr_slate_df.drop(columns=["position_dk"])
 
     # Replace RG position column with DK position
-    pos_lookup = dk_df[["player_key", "position"]]
     rg_df = rg_df.merge(pos_lookup, on="player_key", how="left", suffixes=("", "_dk"))
     rg_df["position"] = rg_df["position_dk"]
     rg_df = rg_df.drop(columns=["position_dk"])
@@ -395,7 +409,14 @@ def generate_lineups(
         df = etr_slate_df
     elif projection_source == "blend":
         df = blend
-    locked = {}
+
+    # locked = {}
+    locked = {
+        "jamalmurray": "PG",
+        "timhardawayjr": "PF",
+        "aarongordon": "C",
+        "bubcarrington": "G",
+    }
     locked_keys = set(locked.keys())
     working_df = df
     if locked:
