@@ -859,19 +859,28 @@ if __name__ == "__main__":
         win_rates["rg_max_fpts"] += slate_win_rates["rg_max_fpts"]
 
     win_rates["blend_adjusted_fragile"] = round(
-        win_rates["blend_adjusted_fragile"] / n_slates, 3
+        win_rates["blend_adjusted_fragile"] / n_slates * 100, 3
     )
-    win_rates["blend_max_fpts"] = round(win_rates["blend_max_fpts"] / n_slates, 3)
+    win_rates["blend_max_fpts"] = round(win_rates["blend_max_fpts"] / n_slates * 100, 3)
     win_rates["etr_adjusted_fragile"] = round(
-        win_rates["etr_adjusted_fragile"] / n_slates, 3
+        win_rates["etr_adjusted_fragile"] / n_slates * 100, 3
     )
-    win_rates["etr_max_fpts"] = round(win_rates["etr_max_fpts"] / n_slates, 3)
+    win_rates["etr_max_fpts"] = round(win_rates["etr_max_fpts"] / n_slates * 100, 3)
     win_rates["rg_adjusted_fragile"] = round(
-        win_rates["rg_adjusted_fragile"] / n_slates, 3
+        win_rates["rg_adjusted_fragile"] / n_slates * 100, 3
     )
-    win_rates["rg_max_fpts"] = round(win_rates["rg_max_fpts"] / n_slates, 3)
+    win_rates["rg_max_fpts"] = round(win_rates["rg_max_fpts"] / n_slates * 100, 3)
 
-    print(f"{win_rates=}")
+    print("=======================================================================")
+    print("Win Rates")
+    print("-----------------------------------------------------------------------")
+    print(f"BLEND Adjusted Fragile: {win_rates['blend_adjusted_fragile']}%")
+    print(f"BLEND Max FPTs: {win_rates['blend_max_fpts']}%")
+    print(f"ETR Adjusted Fragile: {win_rates['etr_adjusted_fragile']}%")
+    print(f"ETR Max FPTs: {win_rates['etr_max_fpts']}%")
+    print(f"RG Adjusted Fragile: {win_rates['rg_adjusted_fragile']}%")
+    print(f"RG Max FPTs: {win_rates['rg_max_fpts']}%")
+    print("=======================================================================")
 
     summary_df, opponents_df = aggregate_results(slate_results, opponent_results)
     summary_df.to_csv("data/processed/backtest.csv")

@@ -118,6 +118,10 @@ if __name__ == "__main__":
                 / "f{slate.sport}_{slate.slate}_{slate.site}_blend_output_{slate.date}.csv"
             )
 
+            logging.info(
+                f"Generating BLEND candidate lineups for slate {slate.slate_id}"
+            )
+
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="blend",
@@ -148,6 +152,8 @@ if __name__ == "__main__":
                 / "f{slate.sport}_{slate.slate}_{slate.site}_etr_output_{slate.date}.csv"
             )
 
+            logging.info(f"Generating ETR candidate lineups for slate {slate.slate_id}")
+
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="etr",
@@ -177,6 +183,8 @@ if __name__ == "__main__":
                 rg_output_dir
                 / "f{slate.sport}_{slate.slate}_{slate.site}_rg_output_{slate.date}.csv"
             )
+
+            logging.info(f"Generating RG candidate lineups for slate {slate.slate_id}")
 
             generate_lineups(
                 slate_id=slate.slate_id,

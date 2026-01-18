@@ -410,13 +410,13 @@ def generate_lineups(
     elif projection_source == "blend":
         df = blend
 
-    # locked = {}
-    locked = {
-        "jamalmurray": "PG",
-        "timhardawayjr": "PF",
-        "aarongordon": "C",
-        "bubcarrington": "G",
-    }
+    locked = {}
+    # locked = {
+    #     "jamalmurray": "PG",
+    #     "timhardawayjr": "PF",
+    #     "aarongordon": "C",
+    #     "bubcarrington": "G",
+    # }
     locked_keys = set(locked.keys())
     working_df = df
     if locked:
