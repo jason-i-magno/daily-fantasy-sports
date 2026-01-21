@@ -62,6 +62,24 @@ _SLATE_ID_RE = re.compile(
     re.VERBOSE,
 )
 
+DATA_DIR = Path("data")
+
+CANDIDATE_LINEUPS_DIR = DATA_DIR / "candidate_lineups"
+PROCESSED_DIR = DATA_DIR / "processed"
+RAW_LINEUPS_DIR = DATA_DIR / "raw"
+
+BLEND_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "blend"
+BLEND_OUTPUT_DIR = PROCESSED_DIR / "blend"
+DK_SALARIES_DIR = RAW_LINEUPS_DIR / "draftkings"
+ETR_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "etr"
+ETR_OUTPUT_DIR = PROCESSED_DIR / "etr"
+ETR_PROJ_DIR = RAW_LINEUPS_DIR / "etr"
+H2H_DIR = PROCESSED_DIR / "h2h"
+RESULTS_DIR = RAW_LINEUPS_DIR / "history"
+RG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "rotogrinders"
+RG_OUTPUT_DIR = PROCESSED_DIR / "rotogrinders"
+RG_PROJ_DIR = RAW_LINEUPS_DIR / "rotogrinders"
+
 
 # ----------------------------
 # Data structures

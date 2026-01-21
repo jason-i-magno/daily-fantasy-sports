@@ -1,36 +1,56 @@
+import argparse
 import logging
 import sys
+import time
 from datetime import datetime
-from pathlib import Path
+from typing import Iterable
 
 from generate_minutes_lineup import (
     generate_lineups,
 )
 from utils import (
+    BLEND_CANDIDATE_DIR,
+    BLEND_OUTPUT_DIR,
+    DK_SALARIES_DIR,
+    ETR_CANDIDATE_DIR,
+    ETR_OUTPUT_DIR,
+    ETR_PROJ_DIR,
+    RESULTS_DIR,
+    RG_CANDIDATE_DIR,
+    RG_OUTPUT_DIR,
+    RG_PROJ_DIR,
     parse_filename,
 )
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    data_dir = Path("data")
-    candidate_lineups_dir = data_dir / "candidate_lineups"
-    processed_lineups_dir = data_dir / "processed"
-    raw_lineups_dir = data_dir / "raw"
+# ----------------------------
+# CLI
+# ----------------------------
 
-    blend_candidate_dir = candidate_lineups_dir / "blend"
-    blend_output_dir = processed_lineups_dir / "blend"
-    etr_candidate_dir = candidate_lineups_dir / "etr"
-    etr_output_dir = processed_lineups_dir / "etr"
-    etr_proj_dir = raw_lineups_dir / "etr"
-    dk_salaries_dir = raw_lineups_dir / "draftkings"
-    results_dir = raw_lineups_dir / "history"
-    rg_candidate_dir = candidate_lineups_dir / "rotogrinders"
-    rg_output_dir = processed_lineups_dir / "rotogrinders"
-    rg_proj_dir = raw_lineups_dir / "rotogrinders"
+
+def parse_args(argv: Iterable[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-w",
+        "--write-candidate-lineups",
+        action="store_true",
+        help="Flag to write candidate lineups to a file.",
+    )
+    parser.add_argument(
+        "-patch",
+        "--patch-candidate-lineups",
+        action="store_true",
+        help="Flag to patch candidate lineups.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Iterable[str]) -> int:
+    logging.basicConfig(level=logging.INFO)
+    args = parse_args(argv)
 
     slates = []
 
-    for results_file in results_dir.iterdir():
+    for results_file in RESULTS_DIR.iterdir():
         if not results_file.is_file():
             continue
 
@@ -49,7 +69,7 @@ if __name__ == "__main__":
         logging.info(f"[{i + 1}/{n_slates}] {slate.slate_id}")
 
         dk_salaries_path = (
-            dk_salaries_dir
+            DK_SALARIES_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_salaries_{slate.date}.csv"
         )
 
@@ -57,7 +77,7 @@ if __name__ == "__main__":
             logging.warning(f"Missing DK salaries file for slate {slate.slate_id}")
 
         etr_candidates_path = (
-            etr_candidate_dir
+            ETR_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
 
@@ -65,7 +85,7 @@ if __name__ == "__main__":
             logging.info(f"Missing ETR candidate lineups for slate {slate.slate_id}")
 
         etr_proj_path = (
-            etr_proj_dir
+            ETR_PROJ_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.date}.csv"
         )
 
@@ -74,7 +94,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         rg_candidates_path = (
-            rg_candidate_dir
+            RG_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
 
@@ -82,7 +102,7 @@ if __name__ == "__main__":
             logging.info(f"Missing RG candidate lineups for slate {slate.slate_id}")
 
         rg_proj_path = (
-            rg_proj_dir
+            RG_PROJ_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.date}.csv"
         )
 
@@ -91,7 +111,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         blend_candidates_path = (
-            blend_candidate_dir
+            BLEND_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
 
@@ -101,6 +121,16 @@ if __name__ == "__main__":
             last_modified = datetime.fromtimestamp(
                 blend_candidates_path.stat().st_mtime
             )
+
+            # with open(blend_candidates_path, "r") as f:
+            #     data = json.load(f)
+
+            # if "top_adjusted" not in data:
+            #     logging.info(
+            #         f"BLEND Top Adjusted lineups not found for slate {slate.slate_id}"
+            #     )
+
+            #     generate_blend_candidates = True
 
             # if datetime.now() - last_modified > timedelta(days=1):
             #     logging.info(
@@ -114,7 +144,7 @@ if __name__ == "__main__":
 
         if generate_blend_candidates:
             blend_output_path = (
-                blend_output_dir
+                BLEND_OUTPUT_DIR
                 / "f{slate.sport}_{slate.slate}_{slate.site}_blend_output_{slate.date}.csv"
             )
 
@@ -122,19 +152,36 @@ if __name__ == "__main__":
                 f"Generating BLEND candidate lineups for slate {slate.slate_id}"
             )
 
+            start_time = time.perf_counter()
+
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="blend",
                 k_lineups=100,
                 maximize_fpts=True,
-                write_candidate_lineups=True,
+                write_candidate_lineups=args.write_candidate_lineups,
+                patch_candidate_lineups=args.patch_candidate_lineups,
                 output_file=blend_output_path,
             )
+
+            end_time = time.perf_counter()
+
+            logging.info(f"Generated lineups in {end_time - start_time:.1f} seconds")
 
         generate_etr_candidates = False
 
         if etr_candidates_path.exists():
             last_modified = datetime.fromtimestamp(etr_candidates_path.stat().st_mtime)
+
+            # with open(etr_candidates_path, "r") as f:
+            #     data = json.load(f)
+
+            # if "top_adjusted" not in data:
+            #     logging.info(
+            #         f"ETR Top Adjusted lineups not found for slate {slate.slate_id}"
+            #     )
+
+            #     generate_etr_candidates = True
 
             # if datetime.now() - last_modified > timedelta(days=1):
             #     logging.info(
@@ -142,31 +189,48 @@ if __name__ == "__main__":
             #     )
             #     generate_etr_candidates = True
         else:
-            logging.info(f"Missing BLEND candidate lineups for slate {slate.slate_id}")
+            logging.info(f"Missing ETR candidate lineups for slate {slate.slate_id}")
 
             generate_etr_candidates = True
 
         if generate_etr_candidates:
             etr_output_path = (
-                etr_output_dir
+                ETR_OUTPUT_DIR
                 / "f{slate.sport}_{slate.slate}_{slate.site}_etr_output_{slate.date}.csv"
             )
 
             logging.info(f"Generating ETR candidate lineups for slate {slate.slate_id}")
+
+            start_time = time.perf_counter()
 
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="etr",
                 k_lineups=100,
                 maximize_fpts=True,
-                write_candidate_lineups=True,
+                write_candidate_lineups=args.write_candidate_lineups,
+                patch_candidate_lineups=args.patch_candidate_lineups,
                 output_file=etr_output_path,
             )
+
+            end_time = time.perf_counter()
+
+            logging.info(f"Generated lineups in {end_time - start_time:.1f} seconds")
 
         generate_rg_candidates = False
 
         if rg_candidates_path.exists():
             last_modified = datetime.fromtimestamp(rg_candidates_path.stat().st_mtime)
+
+            # with open(rg_candidates_path, "r") as f:
+            #     data = json.load(f)
+
+            # if "top_adjusted" not in data:
+            #     logging.info(
+            #         f"RG Top Adjusted lineups not found for slate {slate.slate_id}"
+            #     )
+
+            #     generate_rg_candidates = True
 
             # if datetime.now() - last_modified > timedelta(days=1):
             #     logging.info(
@@ -174,23 +238,34 @@ if __name__ == "__main__":
             #     )
             #     generate_rg_candidates = True
         else:
-            logging.info(f"Missing BLEND candidate lineups for slate {slate.slate_id}")
+            logging.info(f"Missing RG candidate lineups for slate {slate.slate_id}")
 
             generate_rg_candidates = True
 
         if generate_rg_candidates:
             rg_output_path = (
-                rg_output_dir
+                RG_OUTPUT_DIR
                 / "f{slate.sport}_{slate.slate}_{slate.site}_rg_output_{slate.date}.csv"
             )
 
             logging.info(f"Generating RG candidate lineups for slate {slate.slate_id}")
+
+            start_time = time.perf_counter()
 
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="rg",
                 k_lineups=100,
                 maximize_fpts=True,
-                write_candidate_lineups=True,
+                write_candidate_lineups=args.write_candidate_lineups,
+                patch_candidate_lineups=args.patch_candidate_lineups,
                 output_file=rg_output_path,
             )
+
+            end_time = time.perf_counter()
+
+            logging.info(f"Generated lineups in {end_time - start_time:.1f} seconds")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -21,6 +21,13 @@ from typing import List, Set
 
 import pandas as pd
 from utils import (
+    BLEND_CANDIDATE_DIR,
+    ETR_CANDIDATE_DIR,
+    ETR_PROJ_DIR,
+    H2H_DIR,
+    RESULTS_DIR,
+    RG_CANDIDATE_DIR,
+    RG_PROJ_DIR,
     adjusted_score,
     blend_projections,
     load_projection_csv,
@@ -76,6 +83,17 @@ class OpponentResult:
 # ----------------------------
 # Helpers
 # ----------------------------
+def calculate_winnings(fee, win, is_mirror):
+    winnings = -fee
+
+    if is_mirror:
+        winnings = 0
+    elif win == 1:
+        winnings = fee * 0.8
+    elif win == 0.5:
+        winnings = -fee * 0.2
+
+    return winnings
 
 
 def join_proj_results(
@@ -108,12 +126,12 @@ def load_candidate_lineups(path: str) -> dict:
     with open(path, "r") as f:
         payload = json.load(f)
 
-    required = {"slate_id", "top_fpts", "top_minutes"}
+    required = {"slate_id", "top_fpts", "top_minutes", "top_adjusted"}
     missing = required - payload.keys()
     if missing:
         raise ValueError(f"Candidate lineup file missing keys: {missing}")
 
-    return payload["top_fpts"], payload["top_minutes"]
+    return payload["top_fpts"], payload["top_minutes"], payload["top_adjusted"]
 
 
 def load_results_csv(path: str) -> pd.DataFrame:
@@ -322,6 +340,7 @@ def evaluate_h2h_lineups(
     slate_games: int,
     top_fpts_lineups: List[Lineup],
     baseline_proj: Lineup,
+    top_fpts_lineups_minutes_floor: List[Lineup],
     h2h_lineup_1: Lineup,
     h2h_lineup_2: Lineup,
     h2h_lineup_3: Lineup,
@@ -332,8 +351,12 @@ def evaluate_h2h_lineups(
 ) -> List[SlateResult]:
     results: List[SlateResult] = []
     opponent_results = []
+    adjusted_fragile_minutes_floor_wins = 0
+    adjusted_fragile_minutes_floor_winnings = 0
     adjusted_fragile_wins = 0
+    adjusted_fragile_winnings = 0
     max_fpts_wins = 0
+    max_fpts_winnings = 0
 
     top_10_fpts_lineups = top_fpts_lineups[:10]
     actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
@@ -353,6 +376,65 @@ def evaluate_h2h_lineups(
         reverse=True,
     )[0]
 
+    # Adjusted Fragile
+    adjusted_fragile__minutes_floor_lineup = top_fpts_lineups_minutes_floor[0]
+
+    # Opponent H2H $1 vs Adjusted Fragile Minutes Floor
+    slate_result, opponent_result = get_slate_result(
+        adjusted_fragile__minutes_floor_lineup,
+        h2h_lineup_1,
+        top_10_median_actual,
+        slate_id,
+        slate_games,
+        f"{proj_source} H2H $1 Adj Frag Minutes Floor",
+        fee=1,
+        opponent=h2h_opponent_1,
+    )
+    results.append(slate_result)
+    opponent_results.append(opponent_result)
+    adjusted_fragile_minutes_floor_wins += 1 - slate_result.win
+    adjusted_fragile_minutes_floor_winnings += calculate_winnings(
+        1, 1 - slate_result.win, slate_result.is_mirror
+    )
+
+    # Opponent H2H $2 vs Adjusted Fragile Minutes Floor
+    slate_result, opponent_result = get_slate_result(
+        adjusted_fragile__minutes_floor_lineup,
+        h2h_lineup_2,
+        top_10_median_actual,
+        slate_id,
+        slate_games,
+        f"{proj_source} H2H $2 Adj Frag Minutes Floor",
+        fee=2,
+        opponent=h2h_opponent_2,
+    )
+    results.append(slate_result)
+    if h2h_opponent_2 != h2h_opponent_1:
+        opponent_results.append(opponent_result)
+    adjusted_fragile_minutes_floor_wins += 1 - slate_result.win
+    adjusted_fragile_minutes_floor_winnings += calculate_winnings(
+        2, 1 - slate_result.win, slate_result.is_mirror
+    )
+
+    # Opponent H2H $3 vs Adjusted Fragile Minutes Floor
+    slate_result, opponent_result = get_slate_result(
+        adjusted_fragile__minutes_floor_lineup,
+        h2h_lineup_3,
+        top_10_median_actual,
+        slate_id,
+        slate_games,
+        f"{proj_source} H2H $3 Adj Frag Minutes Floor",
+        fee=3,
+        opponent=h2h_opponent_3,
+    )
+    results.append(slate_result)
+    if h2h_opponent_3 != h2h_opponent_2 and h2h_opponent_3 != h2h_opponent_1:
+        opponent_results.append(opponent_result)
+    adjusted_fragile_minutes_floor_wins += 1 - slate_result.win
+    adjusted_fragile_minutes_floor_winnings += calculate_winnings(
+        3, 1 - slate_result.win, slate_result.is_mirror
+    )
+
     # Opponent H2H $1 vs Adjusted Fragile
     slate_result, opponent_result = get_slate_result(
         adjusted_fragile_lineup,
@@ -367,6 +449,9 @@ def evaluate_h2h_lineups(
     results.append(slate_result)
     opponent_results.append(opponent_result)
     adjusted_fragile_wins += 1 - slate_result.win
+    adjusted_fragile_winnings += calculate_winnings(
+        1, 1 - slate_result.win, slate_result.is_mirror
+    )
 
     # Opponent H2H $2 vs Adjusted Fragile
     slate_result, opponent_result = get_slate_result(
@@ -383,6 +468,9 @@ def evaluate_h2h_lineups(
     if h2h_opponent_2 != h2h_opponent_1:
         opponent_results.append(opponent_result)
     adjusted_fragile_wins += 1 - slate_result.win
+    adjusted_fragile_winnings += calculate_winnings(
+        2, 1 - slate_result.win, slate_result.is_mirror
+    )
 
     # Opponent H2H $3 vs Adjusted Fragile
     slate_result, opponent_result = get_slate_result(
@@ -399,6 +487,9 @@ def evaluate_h2h_lineups(
     if h2h_opponent_3 != h2h_opponent_2 and h2h_opponent_3 != h2h_opponent_1:
         opponent_results.append(opponent_result)
     adjusted_fragile_wins += 1 - slate_result.win
+    adjusted_fragile_winnings += calculate_winnings(
+        3, 1 - slate_result.win, slate_result.is_mirror
+    )
 
     # Opponent H2H $1 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -413,6 +504,9 @@ def evaluate_h2h_lineups(
     )
     results.append(slate_result)
     max_fpts_wins += 1 - slate_result.win
+    max_fpts_winnings += calculate_winnings(
+        1, 1 - slate_result.win, slate_result.is_mirror
+    )
 
     # Opponent H2H $2 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -427,6 +521,9 @@ def evaluate_h2h_lineups(
     )
     results.append(slate_result)
     max_fpts_wins += 1 - slate_result.win
+    max_fpts_winnings += calculate_winnings(
+        2, 1 - slate_result.win, slate_result.is_mirror
+    )
 
     # Opponent H2H $3 vs Max FPTs
     slate_result, _ = get_slate_result(
@@ -441,11 +538,24 @@ def evaluate_h2h_lineups(
     )
     results.append(slate_result)
     max_fpts_wins += 1 - slate_result.win
+    max_fpts_winnings += calculate_winnings(
+        3, 1 - slate_result.win, slate_result.is_mirror
+    )
 
+    adjusted_fragile_minutes_floor_win_rate = adjusted_fragile_minutes_floor_wins / 3
     adjusted_fragile_win_rate = adjusted_fragile_wins / 3
     max_fpts_win_rate = max_fpts_wins / 3
 
-    return results, opponent_results, adjusted_fragile_win_rate, max_fpts_win_rate
+    return (
+        results,
+        opponent_results,
+        adjusted_fragile_minutes_floor_win_rate,
+        adjusted_fragile_win_rate,
+        max_fpts_win_rate,
+        adjusted_fragile_minutes_floor_winnings,
+        adjusted_fragile_winnings,
+        max_fpts_winnings,
+    )
 
 
 def get_slate_result(
@@ -604,15 +714,21 @@ def evaluate_slate(
     rg_merged = join_proj_results(rg_proj, results_players_df, id_col=id_col)
     etr_merged = join_proj_results(etr_proj, results_players_df, id_col=id_col)
     blend_merged = join_proj_results(blend_proj, results_players_df, id_col=id_col)
-    rg_top_fpts_player_keys, rg_top_minutes_player_keys = load_candidate_lineups(
-        rg_candidate_lineups_path
-    )
-    etr_top_fpts_player_keys, etr_top_minutes_player_keys = load_candidate_lineups(
-        etr_candidate_lineups_path
-    )
-    blend_top_fpts_player_keys, blend_top_minutes_player_keys = load_candidate_lineups(
-        blend_candidate_lineups_path
-    )
+    (
+        rg_top_fpts_player_keys,
+        rg_top_minutes_player_keys,
+        rg_top_fpts_player_keys_minutes_floor,
+    ) = load_candidate_lineups(rg_candidate_lineups_path)
+    (
+        etr_top_fpts_player_keys,
+        etr_top_minutes_player_keys,
+        etr_top_fpts_player_keys_minutes_floor,
+    ) = load_candidate_lineups(etr_candidate_lineups_path)
+    (
+        blend_top_fpts_player_keys,
+        blend_top_minutes_player_keys,
+        blend_top_fpts_player_keys_minutes_floor,
+    ) = load_candidate_lineups(blend_candidate_lineups_path)
     h2h_results = load_h2h_results(h2h_path)
 
     # Candidate pool: top N by fpts and minutes, then dedupe by player set.
@@ -624,6 +740,10 @@ def evaluate_slate(
         lineup_from_player_keys(blend_merged, player_keys, id_col=id_col)
         for player_keys in blend_top_minutes_player_keys
     ]
+    blend_top_fpts_lineups_minutes_floor = [
+        lineup_from_player_keys(blend_merged, player_keys, id_col=id_col)
+        for player_keys in blend_top_fpts_player_keys_minutes_floor
+    ]
     etr_top_fpts_lineups = [
         lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
         for player_keys in etr_top_fpts_player_keys
@@ -632,6 +752,10 @@ def evaluate_slate(
         lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
         for player_keys in etr_top_minutes_player_keys
     ]
+    etr_top_fpts_lineups_minutes_floor = [
+        lineup_from_player_keys(etr_merged, player_keys, id_col=id_col)
+        for player_keys in etr_top_fpts_player_keys_minutes_floor
+    ]
     rg_top_fpts_lineups = [
         lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
         for player_keys in rg_top_fpts_player_keys
@@ -639,6 +763,10 @@ def evaluate_slate(
     rg_top_minutes_lineups = [
         lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
         for player_keys in rg_top_minutes_player_keys
+    ]
+    rg_top_fpts_lineups_minutes_floor = [
+        lineup_from_player_keys(rg_merged, player_keys, id_col=id_col)
+        for player_keys in rg_top_fpts_player_keys_minutes_floor
     ]
 
     h2h_lineup_1 = lineup_from_player_keys(
@@ -708,51 +836,94 @@ def evaluate_slate(
     )
 
     win_rates = {}
+    winnings = {}
 
-    results, opponent_results, adjusted_fragile_win_rate, max_fpts_win_rate = (
-        evaluate_h2h_lineups(
-            slate_id=Path(rg_proj_path).stem,
-            slate_games=slate_games,
-            top_fpts_lineups=rg_top_fpts_lineups,
-            baseline_proj=baseline_proj,
-            h2h_lineup_1=h2h_lineup_1,
-            h2h_lineup_2=h2h_lineup_2,
-            h2h_lineup_3=h2h_lineup_3,
-            h2h_opponent_1=h2h_opponent_1,
-            h2h_opponent_2=h2h_opponent_2,
-            h2h_opponent_3=h2h_opponent_3,
-            proj_source="RG",
-        )
+    (
+        results,
+        opponent_results,
+        adjusted_fragile_minutes_floor_win_rate,
+        adjusted_fragile_win_rate,
+        max_fpts_win_rate,
+        adjusted_fragile_minutes_floor_winnings,
+        adjusted_fragile_winnings,
+        max_fpts_winnings,
+    ) = evaluate_h2h_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=rg_top_fpts_lineups,
+        baseline_proj=baseline_proj,
+        top_fpts_lineups_minutes_floor=rg_top_fpts_lineups_minutes_floor,
+        h2h_lineup_1=h2h_lineup_1,
+        h2h_lineup_2=h2h_lineup_2,
+        h2h_lineup_3=h2h_lineup_3,
+        h2h_opponent_1=h2h_opponent_1,
+        h2h_opponent_2=h2h_opponent_2,
+        h2h_opponent_3=h2h_opponent_3,
+        proj_source="RG",
     )
     slate_results += results
+    win_rates["rg_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_win_rate
+    )
     win_rates["rg_adjusted_fragile"] = adjusted_fragile_win_rate
     win_rates["rg_max_fpts"] = max_fpts_win_rate
+    winnings["rg_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_winnings
+    )
+    winnings["rg_adjusted_fragile"] = adjusted_fragile_winnings
+    winnings["rg_max_fpts"] = max_fpts_winnings
 
-    results, opp_results, adjusted_fragile_win_rate, max_fpts_win_rate = (
-        evaluate_h2h_lineups(
-            slate_id=Path(rg_proj_path).stem,
-            slate_games=slate_games,
-            top_fpts_lineups=etr_top_fpts_lineups,
-            baseline_proj=etr_top_fpts_lineups[0],
-            h2h_lineup_1=h2h_lineup_1,
-            h2h_lineup_2=h2h_lineup_2,
-            h2h_lineup_3=h2h_lineup_3,
-            h2h_opponent_1=h2h_opponent_1,
-            h2h_opponent_2=h2h_opponent_2,
-            h2h_opponent_3=h2h_opponent_3,
-            proj_source="ETR",
-        )
+    (
+        results,
+        opp_results,
+        adjusted_fragile_minutes_floor_win_rate,
+        adjusted_fragile_win_rate,
+        max_fpts_win_rate,
+        adjusted_fragile_minutes_floor_winnings,
+        adjusted_fragile_winnings,
+        max_fpts_winnings,
+    ) = evaluate_h2h_lineups(
+        slate_id=Path(rg_proj_path).stem,
+        slate_games=slate_games,
+        top_fpts_lineups=etr_top_fpts_lineups,
+        baseline_proj=etr_top_fpts_lineups[0],
+        top_fpts_lineups_minutes_floor=etr_top_fpts_lineups_minutes_floor,
+        h2h_lineup_1=h2h_lineup_1,
+        h2h_lineup_2=h2h_lineup_2,
+        h2h_lineup_3=h2h_lineup_3,
+        h2h_opponent_1=h2h_opponent_1,
+        h2h_opponent_2=h2h_opponent_2,
+        h2h_opponent_3=h2h_opponent_3,
+        proj_source="ETR",
     )
     slate_results += results
     opponent_results += opp_results
+    win_rates["etr_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_win_rate
+    )
     win_rates["etr_adjusted_fragile"] = adjusted_fragile_win_rate
     win_rates["etr_max_fpts"] = max_fpts_win_rate
+    winnings["etr_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_winnings
+    )
+    winnings["etr_adjusted_fragile"] = adjusted_fragile_winnings
+    winnings["etr_max_fpts"] = max_fpts_winnings
 
-    results, _, adjusted_fragile_win_rate, max_fpts_win_rate = evaluate_h2h_lineups(
+    (
+        results,
+        _,
+        adjusted_fragile_minutes_floor_win_rate,
+        adjusted_fragile_win_rate,
+        max_fpts_win_rate,
+        adjusted_fragile_minutes_floor_winnings,
+        adjusted_fragile_winnings,
+        max_fpts_winnings,
+    ) = evaluate_h2h_lineups(
         slate_id=Path(rg_proj_path).stem,
         slate_games=slate_games,
         top_fpts_lineups=blend_top_fpts_lineups,
         baseline_proj=blend_top_fpts_lineups[0],
+        top_fpts_lineups_minutes_floor=blend_top_fpts_lineups_minutes_floor,
         h2h_lineup_1=h2h_lineup_1,
         h2h_lineup_2=h2h_lineup_2,
         h2h_lineup_3=h2h_lineup_3,
@@ -762,27 +933,26 @@ def evaluate_slate(
         proj_source="BLEND",
     )
     slate_results += results
+    win_rates["blend_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_win_rate
+    )
     win_rates["blend_adjusted_fragile"] = adjusted_fragile_win_rate
     win_rates["blend_max_fpts"] = max_fpts_win_rate
+    winnings["blend_adjusted_fragile_minutes_floor"] = (
+        adjusted_fragile_minutes_floor_winnings
+    )
+    winnings["blend_adjusted_fragile"] = adjusted_fragile_winnings
+    winnings["blend_max_fpts"] = max_fpts_winnings
 
-    return slate_results, opponent_results, win_rates
+    return slate_results, opponent_results, win_rates, winnings
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    data_dir = Path("data")
-
-    blend_candidate_dir = data_dir / "candidate_lineups" / "blend"
-    etr_candidate_dir = data_dir / "candidate_lineups" / "etr"
-    etr_proj_dir = data_dir / "raw" / "etr"
-    h2h_dir = data_dir / "processed" / "h2h"
-    results_dir = data_dir / "raw" / "history"
-    rg_candidate_dir = data_dir / "candidate_lineups" / "rotogrinders"
-    rg_proj_dir = data_dir / "raw" / "rotogrinders"
 
     slates = []
 
-    for results_file in results_dir.iterdir():
+    for results_file in RESULTS_DIR.iterdir():
         if not results_file.is_file():
             continue
 
@@ -800,10 +970,24 @@ if __name__ == "__main__":
     slate_results = []
     opponent_results = []
     win_rates = {
+        "blend_adjusted_fragile_minutes_floor": 0,
         "blend_adjusted_fragile": 0,
         "blend_max_fpts": 0,
+        "etr_adjusted_fragile_minutes_floor": 0,
         "etr_adjusted_fragile": 0,
         "etr_max_fpts": 0,
+        "rg_adjusted_fragile_minutes_floor": 0,
+        "rg_adjusted_fragile": 0,
+        "rg_max_fpts": 0,
+    }
+    winnings = {
+        "blend_adjusted_fragile_minutes_floor": 0,
+        "blend_adjusted_fragile": 0,
+        "blend_max_fpts": 0,
+        "etr_adjusted_fragile_minutes_floor": 0,
+        "etr_adjusted_fragile": 0,
+        "etr_max_fpts": 0,
+        "rg_adjusted_fragile_minutes_floor": 0,
         "rg_adjusted_fragile": 0,
         "rg_max_fpts": 0,
     }
@@ -812,34 +996,34 @@ if __name__ == "__main__":
         logging.info(f"[{i + 1}/{n_slates}] {slate.slate_id}")
 
         blend_candidate_lineups_path = (
-            blend_candidate_dir
+            BLEND_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
         etr_candidate_lineups_path = (
-            etr_candidate_dir
+            ETR_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
         etr_proj_path = (
-            etr_proj_dir
+            ETR_PROJ_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.date}.csv"
         )
         h2h_path = (
-            h2h_dir / f"{slate.sport}_{slate.slate}_{slate.site}_h2h_{slate.date}.json"
+            H2H_DIR / f"{slate.sport}_{slate.slate}_{slate.site}_h2h_{slate.date}.json"
         )
         rg_proj_path = (
-            rg_proj_dir
+            RG_PROJ_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.date}.csv"
         )
         rg_candidate_lineups_path = (
-            rg_candidate_dir
+            RG_CANDIDATE_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
         results_path = (
-            results_dir
+            RESULTS_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.date}.csv"
         )
 
-        results, opp_results, slate_win_rates = evaluate_slate(
+        results, opp_results, slate_win_rates, slate_winnings = evaluate_slate(
             blend_candidate_lineups_path=blend_candidate_lineups_path,
             etr_candidate_lineups_path=etr_candidate_lineups_path,
             etr_proj_path=etr_proj_path,
@@ -851,35 +1035,110 @@ if __name__ == "__main__":
 
         slate_results += results
         opponent_results += opp_results
+        win_rates["blend_adjusted_fragile_minutes_floor"] += slate_win_rates[
+            "blend_adjusted_fragile_minutes_floor"
+        ]
         win_rates["blend_adjusted_fragile"] += slate_win_rates["blend_adjusted_fragile"]
         win_rates["blend_max_fpts"] += slate_win_rates["blend_max_fpts"]
+        win_rates["etr_adjusted_fragile_minutes_floor"] += slate_win_rates[
+            "etr_adjusted_fragile_minutes_floor"
+        ]
         win_rates["etr_adjusted_fragile"] += slate_win_rates["etr_adjusted_fragile"]
         win_rates["etr_max_fpts"] += slate_win_rates["etr_max_fpts"]
+        win_rates["rg_adjusted_fragile_minutes_floor"] += slate_win_rates[
+            "rg_adjusted_fragile_minutes_floor"
+        ]
         win_rates["rg_adjusted_fragile"] += slate_win_rates["rg_adjusted_fragile"]
         win_rates["rg_max_fpts"] += slate_win_rates["rg_max_fpts"]
+        winnings["blend_adjusted_fragile_minutes_floor"] += slate_winnings[
+            "blend_adjusted_fragile_minutes_floor"
+        ]
+        winnings["blend_adjusted_fragile"] += slate_winnings["blend_adjusted_fragile"]
+        winnings["blend_max_fpts"] += slate_winnings["blend_max_fpts"]
+        winnings["etr_adjusted_fragile_minutes_floor"] += slate_winnings[
+            "etr_adjusted_fragile_minutes_floor"
+        ]
+        winnings["etr_adjusted_fragile"] += slate_winnings["etr_adjusted_fragile"]
+        winnings["etr_max_fpts"] += slate_winnings["etr_max_fpts"]
+        winnings["rg_adjusted_fragile_minutes_floor"] += slate_winnings[
+            "rg_adjusted_fragile_minutes_floor"
+        ]
+        winnings["rg_adjusted_fragile"] += slate_winnings["rg_adjusted_fragile"]
+        winnings["rg_max_fpts"] += slate_winnings["rg_max_fpts"]
 
+    win_rates["blend_adjusted_fragile_minutes_floor"] = round(
+        win_rates["blend_adjusted_fragile_minutes_floor"] / n_slates * 100, 3
+    )
     win_rates["blend_adjusted_fragile"] = round(
         win_rates["blend_adjusted_fragile"] / n_slates * 100, 3
     )
     win_rates["blend_max_fpts"] = round(win_rates["blend_max_fpts"] / n_slates * 100, 3)
+    win_rates["etr_adjusted_fragile_minutes_floor"] = round(
+        win_rates["etr_adjusted_fragile_minutes_floor"] / n_slates * 100, 3
+    )
     win_rates["etr_adjusted_fragile"] = round(
         win_rates["etr_adjusted_fragile"] / n_slates * 100, 3
     )
     win_rates["etr_max_fpts"] = round(win_rates["etr_max_fpts"] / n_slates * 100, 3)
+    win_rates["rg_adjusted_fragile_minutes_floor"] = round(
+        win_rates["rg_adjusted_fragile_minutes_floor"] / n_slates * 100, 3
+    )
     win_rates["rg_adjusted_fragile"] = round(
         win_rates["rg_adjusted_fragile"] / n_slates * 100, 3
     )
     win_rates["rg_max_fpts"] = round(win_rates["rg_max_fpts"] / n_slates * 100, 3)
+    winnings["blend_adjusted_fragile_minutes_floor"] = round(
+        winnings["blend_adjusted_fragile_minutes_floor"], 2
+    )
+    winnings["blend_adjusted_fragile"] = round(winnings["blend_adjusted_fragile"], 2)
+    winnings["blend_max_fpts"] = round(winnings["blend_max_fpts"], 2)
+    winnings["etr_adjusted_fragile_minutes_floor"] = round(
+        winnings["etr_adjusted_fragile_minutes_floor"], 2
+    )
+    winnings["etr_adjusted_fragile"] = round(winnings["etr_adjusted_fragile"], 2)
+    winnings["etr_max_fpts"] = round(winnings["etr_max_fpts"], 2)
+    winnings["rg_adjusted_fragile_minutes_floor"] = round(
+        winnings["rg_adjusted_fragile_minutes_floor"], 2
+    )
+    winnings["rg_adjusted_fragile"] = round(winnings["rg_adjusted_fragile"], 2)
+    winnings["rg_max_fpts"] = round(winnings["rg_max_fpts"], 2)
 
     print("=======================================================================")
     print("Win Rates")
     print("-----------------------------------------------------------------------")
+    print(
+        f"BLEND Adjusted Fragile Minutes Floor: {win_rates['blend_adjusted_fragile_minutes_floor']}%"
+    )
     print(f"BLEND Adjusted Fragile: {win_rates['blend_adjusted_fragile']}%")
     print(f"BLEND Max FPTs: {win_rates['blend_max_fpts']}%")
+    print(
+        f"ETR Adjusted Fragile Minutes Floor: {win_rates['etr_adjusted_fragile_minutes_floor']}%"
+    )
     print(f"ETR Adjusted Fragile: {win_rates['etr_adjusted_fragile']}%")
     print(f"ETR Max FPTs: {win_rates['etr_max_fpts']}%")
+    print(
+        f"RG Adjusted Fragile Minutes Floor: {win_rates['rg_adjusted_fragile_minutes_floor']}%"
+    )
     print(f"RG Adjusted Fragile: {win_rates['rg_adjusted_fragile']}%")
     print(f"RG Max FPTs: {win_rates['rg_max_fpts']}%")
+    print("=======================================================================")
+    print("Winnings")
+    print("-----------------------------------------------------------------------")
+    print(
+        f"BLEND Adjusted Fragile Minutes Floor: ${winnings['blend_adjusted_fragile_minutes_floor']}"
+    )
+    print(f"BLEND Adjusted Fragile: ${winnings['blend_adjusted_fragile']}")
+    print(f"BLEND Max FPTs: ${winnings['blend_max_fpts']}")
+    print(
+        f"ETR Adjusted Fragile Minutes Floor: ${winnings['etr_adjusted_fragile_minutes_floor']}"
+    )
+    print(f"ETR Adjusted Fragile: ${winnings['etr_adjusted_fragile']}")
+    print(f"ETR Max FPTs: ${winnings['etr_max_fpts']}")
+    print(
+        f"RG Adjusted Fragile Minutes Floor: ${winnings['rg_adjusted_fragile_minutes_floor']}"
+    )
+    print(f"RG Adjusted Fragile: ${winnings['rg_adjusted_fragile']}")
+    print(f"RG Max FPTs: ${winnings['rg_max_fpts']}")
     print("=======================================================================")
 
     summary_df, opponents_df = aggregate_results(slate_results, opponent_results)
