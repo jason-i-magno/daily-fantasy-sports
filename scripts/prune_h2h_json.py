@@ -16,6 +16,11 @@ def clean_contest_json(input_path: Path) -> None:
 
     cleaned = {"fee_1": {}, "fee_2": {}, "fee_3": {}}
 
+    if len(raw["fee_1"]["lineup"]) == 0:
+        print(f"File empty. Skipping {input_path.name}")
+
+        return
+
     for fee in cleaned.keys():
         cleaned[fee]["entry_name"] = raw[fee]["entry_name"]
         cleaned[fee]["points"] = raw[fee]["points"]

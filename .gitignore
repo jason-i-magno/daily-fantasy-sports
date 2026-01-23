@@ -2,6 +2,7 @@
 data/candidate_lineups/
 data/processed/
 data/raw/
+data/test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

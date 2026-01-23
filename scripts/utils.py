@@ -10,7 +10,7 @@ import re
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Set, Tuple
+from typing import Dict, Iterable, List, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -62,6 +62,7 @@ _SLATE_ID_RE = re.compile(
     re.VERBOSE,
 )
 
+# Path Constants
 DATA_DIR = Path("data")
 
 CANDIDATE_LINEUPS_DIR = DATA_DIR / "candidate_lineups"
@@ -79,6 +80,39 @@ RESULTS_DIR = RAW_LINEUPS_DIR / "history"
 RG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "rotogrinders"
 RG_OUTPUT_DIR = PROCESSED_DIR / "rotogrinders"
 RG_PROJ_DIR = RAW_LINEUPS_DIR / "rotogrinders"
+
+# Lineup Structure
+SLOTS: List[Dict] = [
+    {"name": "PG", "allowed": {"PG"}},
+    {"name": "SG", "allowed": {"SG"}},
+    {"name": "SF", "allowed": {"SF"}},
+    {"name": "PF", "allowed": {"PF"}},
+    {"name": "C", "allowed": {"C"}},
+    {"name": "G", "allowed": {"PG", "SG"}},
+    {"name": "F", "allowed": {"SF", "PF"}},
+    {"name": "UTIL", "allowed": None},
+]
+
+# Projection Columns
+RG_PROJ_COLS = [
+    "player_name",
+    "salary",
+    "proj_minutes",
+    "proj_fpts",
+    "position",
+    "ceiling",
+    "floor",
+    "team",
+]
+ETR_PROJ_COLS = [
+    "player_name",
+    "salary",
+    "proj_minutes",
+    "proj_fpts",
+    "position",
+    "ceiling",
+    "team",
+]
 
 
 # ----------------------------
@@ -187,6 +221,15 @@ def ensure_output_path(path_str: str) -> Path:
     return path
 
 
+def get_proj_cols(proj_source: str) -> List[str]:
+    if proj_source == "rg":
+        return RG_PROJ_COLS
+    elif proj_source == "etr":
+        return ETR_PROJ_COLS
+    else:
+        raise ValueError("Invalid projection source.")
+
+
 def load_dk_salaries_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
     cols = [
         "player_name",
@@ -214,31 +257,18 @@ def load_dk_salaries_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
 
 def load_projection_csv(
     path: Path, remove_nan: bool = True
-) -> tuple[pd.DataFrame, int, list[str]]:
-    cols = []
-    if "rotogrinders" in str(path):
-        cols = [
-            "player_name",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "position",
-            "ceiling",
-            "floor",
-            "team",
-        ]
-    elif "etr" in str(path):
-        cols = [
-            "player_name",
-            "salary",
-            "proj_minutes",
-            "proj_fpts",
-            "position",
-            "ceiling",
-            "team",
-        ]
-    df = pd.read_csv(path)
+) -> tuple[pd.DataFrame, int]:
+    source = None
 
+    if "rotogrinders" in str(path):
+        source = "rg"
+    elif "etr" in str(path):
+        source = "etr"
+    else:
+        raise ValueError("Invalid projection source.")
+
+    cols = get_proj_cols(source)
+    df = pd.read_csv(path)
     df = normalize_columns(
         df,
         required=[
@@ -258,7 +288,7 @@ def load_projection_csv(
     df["ceiling"] = coerce_numeric(df["ceiling"])
     df["player_key"] = df["player_name"].map(normalize_name)
 
-    if "rotogrinders" in str(path):
+    if source == "rg":
         df["floor"] = coerce_numeric(df["floor"])
 
     if remove_nan:
@@ -268,7 +298,7 @@ def load_projection_csv(
         df["proj_fpts_filled"] = df["proj_fpts"].fillna(0.0)
         df["proj_minutes_filled"] = df["proj_minutes"].fillna(0.0)
 
-        if "rotogrinders" in str(path):
+        if source == "rg":
             df["floor_filled"] = df["floor"].fillna(0.0)
 
     df = df[df["positions"].map(bool)]
@@ -284,7 +314,31 @@ def load_projection_csv(
 
     slate_games = infer_slate_games(df)
 
-    return df.reset_index(drop=True), slate_games, cols
+    return df.reset_index(drop=True), slate_games
+
+
+def load_projections(slate: SlateMeta, remove_nan: bool):
+    etr_proj_path = (
+        ETR_PROJ_DIR
+        / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.date}.csv"
+    )
+
+    if not etr_proj_path.is_file():
+        raise FileNotFoundError(f"ETR projection file not found '{etr_proj_path}'")
+
+    rg_proj_path = (
+        RG_PROJ_DIR
+        / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.date}.csv"
+    )
+
+    if not rg_proj_path.is_file():
+        raise FileNotFoundError(f"RG projection file not found '{rg_proj_path}'")
+
+    rg_proj, slate_games = load_projection_csv(rg_proj_path, remove_nan=False)
+    etr_proj, _ = load_projection_csv(etr_proj_path, remove_nan=False)
+    blend_proj = blend_projections(rg_proj, etr_proj)
+
+    return blend_proj, etr_proj, rg_proj, slate_games
 
 
 def normalize_columns(

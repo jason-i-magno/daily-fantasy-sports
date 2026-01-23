@@ -91,8 +91,8 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
-    etr_df, _, _ = load_projection_csv(args.etr)
-    rg_df, _, _ = load_projection_csv(args.rg)
+    etr_df, _ = load_projection_csv(args.etr)
+    rg_df, _ = load_projection_csv(args.rg)
 
     merged = merge_and_diff(etr_df, rg_df)
     if args.min_diff > 0:

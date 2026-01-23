@@ -115,7 +115,10 @@ def main(argv: Iterable[str]) -> int:
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
 
+        k_lineups = 100
         generate_blend_candidates = False
+        generate_etr_candidates = False
+        generate_rg_candidates = False
 
         if blend_candidates_path.exists():
             last_modified = datetime.fromtimestamp(
@@ -157,7 +160,7 @@ def main(argv: Iterable[str]) -> int:
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="blend",
-                k_lineups=100,
+                k_lineups=k_lineups,
                 maximize_fpts=True,
                 write_candidate_lineups=args.write_candidate_lineups,
                 patch_candidate_lineups=args.patch_candidate_lineups,
@@ -167,8 +170,6 @@ def main(argv: Iterable[str]) -> int:
             end_time = time.perf_counter()
 
             logging.info(f"Generated lineups in {end_time - start_time:.1f} seconds")
-
-        generate_etr_candidates = False
 
         if etr_candidates_path.exists():
             last_modified = datetime.fromtimestamp(etr_candidates_path.stat().st_mtime)
@@ -206,7 +207,7 @@ def main(argv: Iterable[str]) -> int:
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="etr",
-                k_lineups=100,
+                k_lineups=k_lineups,
                 maximize_fpts=True,
                 write_candidate_lineups=args.write_candidate_lineups,
                 patch_candidate_lineups=args.patch_candidate_lineups,
@@ -216,8 +217,6 @@ def main(argv: Iterable[str]) -> int:
             end_time = time.perf_counter()
 
             logging.info(f"Generated lineups in {end_time - start_time:.1f} seconds")
-
-        generate_rg_candidates = False
 
         if rg_candidates_path.exists():
             last_modified = datetime.fromtimestamp(rg_candidates_path.stat().st_mtime)
@@ -255,7 +254,7 @@ def main(argv: Iterable[str]) -> int:
             generate_lineups(
                 slate_id=slate.slate_id,
                 projection_source="rg",
-                k_lineups=100,
+                k_lineups=k_lineups,
                 maximize_fpts=True,
                 write_candidate_lineups=args.write_candidate_lineups,
                 patch_candidate_lineups=args.patch_candidate_lineups,

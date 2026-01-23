@@ -15,7 +15,7 @@ import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Iterable, List
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -23,13 +23,12 @@ import pulp
 from utils import (
     CANDIDATE_LINEUPS_DIR,
     DK_SALARIES_DIR,
-    ETR_PROJ_DIR,
-    RG_PROJ_DIR,
+    SLOTS,
     ResultsFileMeta,
     adjusted_score,
-    blend_projections,
+    get_proj_cols,
     load_dk_salaries_csv,
-    load_projection_csv,
+    load_projections,
     normalize_name,
     parse_slate_id,
     total_fragile_minutes,
@@ -80,8 +79,10 @@ def patch_lineup_file(path: Path, top_adjusted_player_keys: List[List[int]]) -> 
 
 
 def write_lineup(
-    lineup: pd.DataFrame, cols: list[str], out_file: io.TextIOWrapper
+    lineup: pd.DataFrame, proj_source: str, out_file: io.TextIOWrapper
 ) -> None:
+    cols = get_proj_cols(proj_source)
+
     SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
     lineup = lineup.copy()
     lineup["slot"] = pd.Categorical(lineup["slot"], categories=SLOT_ORDER, ordered=True)
@@ -135,17 +136,6 @@ def write_lineups_to_file(
 # ----------------------------
 # ILP Model
 # ----------------------------
-SLOTS: List[Dict] = [
-    {"name": "PG", "allowed": {"PG"}},
-    {"name": "SG", "allowed": {"SG"}},
-    {"name": "SF", "allowed": {"SF"}},
-    {"name": "PF", "allowed": {"PF"}},
-    {"name": "C", "allowed": {"C"}},
-    {"name": "G", "allowed": {"PG", "SG"}},
-    {"name": "F", "allowed": {"SF", "PF"}},
-    {"name": "UTIL", "allowed": None},
-]
-
 slot_index = {
     "PG": 0,
     "SG": 1,
@@ -239,7 +229,9 @@ def build_ilp_with_slots(
     return prob, y
 
 
-def extract_lineup(df: pd.DataFrame, y, cols: list[str]) -> pd.DataFrame:
+def extract_lineup(df: pd.DataFrame, y, proj_source: str) -> pd.DataFrame:
+    cols = get_proj_cols(proj_source)
+
     rows = []
     for (i, s), var in y.items():
         if var.value() == 1:
@@ -257,7 +249,7 @@ def extract_lineup(df: pd.DataFrame, y, cols: list[str]) -> pd.DataFrame:
 
 def solve_top_k_lineups(
     df: pd.DataFrame,
-    cols: list[str],
+    proj_source: str,
     k: int = 10,
     maximize_fpts: bool = False,
     locked_assignments: dict[int, int] | None = None,
@@ -274,7 +266,7 @@ def solve_top_k_lineups(
         if status != pulp.LpStatusOptimal:
             break
 
-        lineup_df = extract_lineup(df, y, cols)
+        lineup_df = extract_lineup(df, y, proj_source)
         total_minutes = lineup_df["proj_minutes"].sum()
 
         lineups.append(
@@ -350,26 +342,6 @@ def generate_lineups(
     meta = parse_slate_id(slate_id)
     print(meta.id)
 
-    etr_proj_path = (
-        ETR_PROJ_DIR
-        / f"{meta.sport}_{meta.slate}_{meta.site}_etr_projections_{meta.date}.csv"
-    )
-
-    if projection_source == "etr" and not etr_proj_path.is_file():
-        logging.error(f"ETR projection file not found '{etr_proj_path}'")
-
-        return 1
-
-    rg_proj_path = (
-        RG_PROJ_DIR
-        / f"{meta.sport}_{meta.slate}_{meta.site}_rg_projections_{meta.date}.csv"
-    )
-
-    if not rg_proj_path.is_file():
-        logging.error(f"Rotogrinders projection file not found '{rg_proj_path}'")
-
-        return 1
-
     dk_salaries_path = (
         DK_SALARIES_DIR
         / f"{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.date}.csv"
@@ -380,8 +352,7 @@ def generate_lineups(
 
         return 1
 
-    rg_df, slate_games, cols = load_projection_csv(rg_proj_path)
-    etr_df, slate_games, cols = load_projection_csv(etr_proj_path, remove_nan=False)
+    blend, etr_df, rg_df, slate_games = load_projections(meta, remove_nan=True)
 
     etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
 
@@ -447,8 +418,6 @@ def generate_lineups(
     missing_rg_players = set(rg_df["player_key"]) - set(etr_slate_df["player_key"])
     print(f"{missing_rg_players=}")
 
-    blend = blend_projections(rg_df, etr_slate_df)
-
     if projection_source == "rg":
         df = rg_df
     elif projection_source == "etr":
@@ -457,10 +426,6 @@ def generate_lineups(
         df = blend
 
     locked = {}
-    # locked = {
-    #     "walterclaytonjr": "SG",
-    #     "ivicazubac": "UTIL",
-    # }
     locked_keys = set(locked.keys())
     working_df = df
     if locked:
@@ -478,7 +443,7 @@ def generate_lineups(
 
     # Generate top k adjusted lineups
     # Disallow any player under minutes floor.
-    working_df = working_df[working_df["proj_minutes"] >= 22].reset_index(drop=True)
+    # working_df = working_df[working_df["proj_minutes"] >= 22].reset_index(drop=True)
 
     locked_assignments = {}
     for player_key, position in locked.items():
@@ -488,7 +453,7 @@ def generate_lineups(
 
     adjusted_lineups = solve_top_k_lineups(
         working_df,
-        cols=cols,
+        proj_source=projection_source,
         k=k_lineups,
         maximize_fpts=True if maximize_fpts else False,
         locked_assignments=locked_assignments,
@@ -535,7 +500,7 @@ def generate_lineups(
         # Generate top k maximum minutes lineups
         max_minutes_lineups = solve_top_k_lineups(
             working_df,
-            cols=cols,
+            proj_source=projection_source,
             k=k_lineups,
             maximize_fpts=False,
             locked_assignments=locked_assignments,
@@ -544,7 +509,7 @@ def generate_lineups(
         # Generate top k maximum FPTs lineus
         max_fpts_lineups = solve_top_k_lineups(
             working_df,
-            cols=cols,
+            proj_source=projection_source,
             k=k_lineups,
             maximize_fpts=True,
             locked_assignments=locked_assignments,
@@ -572,15 +537,10 @@ def generate_lineups(
             top_adjusted_player_keys=top_adjusted_player_keys,
         )
 
-    max_fpts = 0
-    max_minutes = 0
-    max_ceil = 0
-    max_floor = 0
-
     # Generate top k maximum minutes lineups
     top_minutes_lineup = solve_top_k_lineups(
         working_df,
-        cols=cols,
+        proj_source=projection_source,
         k=1,
         maximize_fpts=False,
         locked_assignments=locked_assignments,
@@ -589,7 +549,7 @@ def generate_lineups(
     # Generate top k maximum FPTs lineus
     top_fpts_lineup = solve_top_k_lineups(
         working_df,
-        cols=cols,
+        proj_source=projection_source,
         k=1,
         maximize_fpts=True,
         locked_assignments=locked_assignments,
@@ -598,23 +558,16 @@ def generate_lineups(
     with open(output_file, "w") as out_file:
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup ")
-        write_lineup(top_minutes_lineup["lineup"], cols, out_file)
+        write_lineup(top_minutes_lineup["lineup"], projection_source, out_file)
 
         # Write max fpts lineup info to output file
         out_file.write("\nMax FPTS Lineup ")
-        write_lineup(top_fpts_lineup["lineup"], cols, out_file)
+        write_lineup(top_fpts_lineup["lineup"], projection_source, out_file)
 
         # Print top k lineups to stdout and write them to the output file
         for i, lineup in enumerate(adjusted_lineups):
             out_file.write(f"\nLineup #{i} ")
-            write_lineup(lineup["lineup"], cols, out_file)
-
-            max_fpts = max(max_fpts, lineup["lineup"]["proj_fpts"].sum())
-            max_minutes = max(max_minutes, lineup["lineup"]["proj_minutes"].sum())
-            max_ceil = max(max_ceil, lineup["lineup"]["ceiling"].sum())
-
-            if "floor" in cols:
-                max_floor = max(max_floor, lineup["lineup"]["floor"].sum())
+            write_lineup(lineup["lineup"], projection_source, out_file)
 
 
 def main(argv: Iterable[str]) -> int:
