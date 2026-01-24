@@ -1,5 +1,6 @@
 # Data directories
 data/candidate_lineups/
+data/candidate_lineups_archive/
 data/processed/
 data/raw/
 data/test/

@@ -30,6 +30,8 @@ from utils import (
     ResultsFileMeta,
     SlateMeta,
     adjusted_score,
+    blend_projections,
+    load_dk_salaries_csv,
     load_projections,
     normalize_name,
     parse_filename,
@@ -160,6 +162,12 @@ def calculate_winnings(fee, win, is_mirror):
     return winnings
 
 
+def extract_game_id(game_info: str) -> str:
+    if not isinstance(game_info, str) or not game_info.strip():
+        return ""
+    return game_info.split()[0]
+
+
 def join_proj_results(
     proj: pd.DataFrame, results: pd.DataFrame, id_col: str = "player_key"
 ) -> pd.DataFrame:
@@ -174,7 +182,7 @@ def join_proj_results(
     return merged
 
 
-def lineup_from_keys(player_keys: list[str], full_df: pd.DataFrame):
+def lineup_from_keys(player_keys: list[str], dk_salaries: pd.DataFrame):
     """
     Convert 8 player_keys into a DataFrame compatible with validate_lineup().
     Requires full_df to contain player metadata.
@@ -185,21 +193,20 @@ def lineup_from_keys(player_keys: list[str], full_df: pd.DataFrame):
     SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
 
     # Map each player_key → slot
-    df_lineup = pd.DataFrame({"player_key": player_keys, "slot": SLOT_ORDER})
-
-    # Merge in metadata (salary, positions, game_time_local, proj_minutes)
-    merged = df_lineup.merge(
-        full_df,
-        on="player_key",
-        how="left",
-        validate="one_to_one",
+    lookup = dk_salaries.set_index("player_key")
+    df_lineup = pd.DataFrame({"player_key": player_keys, "slot": SLOT_ORDER}).assign(
+        salary=lambda df: df["player_key"].map(lookup["salary"]),
+        team=lambda df: df["player_key"].map(lookup["team"]),
+        game_info=lambda df: df["player_key"].map(lookup["game_info"]),
+        positions=lambda df: df["player_key"].map(lookup["positions"]),
     )
 
-    missing = merged[merged.isna().any(axis=1)]
+    missing = df_lineup[df_lineup.isna().any(axis=1)]
     if not missing.empty:
+        print(df_lineup.to_string())
         raise ValueError(f"Unknown players in lineup: {missing['player_key'].tolist()}")
 
-    return merged
+    return df_lineup
 
 
 def load_h2h_results(slate: ResultsFileMeta, results_df: pd.DataFrame) -> H2HResults:
@@ -239,7 +246,7 @@ def load_h2h_results(slate: ResultsFileMeta, results_df: pd.DataFrame) -> H2HRes
 
 
 def load_candidate_lineups(
-    slate: ResultsFileMeta, proj_source: str, proj: pd.DataFrame
+    meta: SlateMeta, proj_source: str, proj: pd.DataFrame, dk_salaries: pd.DataFrame
 ) -> Tuple[List[Lineup], List[Lineup], List[Lineup]]:
     candidate_dirs = {
         "blend": BLEND_CANDIDATE_DIR,
@@ -248,7 +255,7 @@ def load_candidate_lineups(
     }
     candidate_lineups_path = (
         candidate_dirs[proj_source]
-        / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
+        / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
     )
 
     with open(candidate_lineups_path, "r") as f:
@@ -265,14 +272,18 @@ def load_candidate_lineups(
     top_minutes_keys = payload["top_minutes"][:n_lineups]
     top_fpts_minutes_floor_keys = payload["top_adjusted"][:n_lineups]
 
-    # for lineups in [top_fpts_lineups, top_minutes_lineups, top_adjusted_lineups]:
-    #     for lineup in lineups:
-    #         lineup_df = lineup_from_keys(lineup, full_df)
-    #         errors = validate_lineup(lineup_df, full_df)
+    for i, lineups in enumerate(
+        [top_fpts_keys, top_minutes_keys, top_fpts_minutes_floor_keys]
+    ):
+        for lineup in lineups:
+            lineup_df = lineup_from_keys(lineup, dk_salaries)
+            errors = validate_lineup(lineup_df, dk_salaries)
 
-    #         if errors:
-    #             for error in errors:
-    #                 logging.error(error)
+            if errors:
+                print(i, proj_source)
+                print(lineup)
+                for error in errors:
+                    logging.error(error)
 
     top_fpts_lineups = [
         lineup_from_player_keys(proj, player_keys) for player_keys in top_fpts_keys
@@ -293,24 +304,24 @@ def load_candidate_lineups(
 
 
 def load_candidates(
-    slate: ResultsFileMeta, blend_proj, etr_proj, rg_proj
+    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries
 ) -> TopLineups:
     lineups = TopLineups()
     (
         lineups.rg_fpts,
         lineups.rg_minutes,
         lineups.rg_fpts_minutes_floor,
-    ) = load_candidate_lineups(slate, "rg", rg_proj)
+    ) = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries)
     (
         lineups.etr_fpts,
         lineups.etr_minutes,
         lineups.etr_fpts_minutes_floor,
-    ) = load_candidate_lineups(slate, "etr", etr_proj)
+    ) = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries)
     (
         lineups.blend_fpts,
         lineups.blend_minutes,
         lineups.blend_fpts_minutes_floor,
-    ) = load_candidate_lineups(slate, "blend", blend_proj)
+    ) = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries)
 
     return lineups
 
@@ -422,10 +433,10 @@ def print_evaluation(eval: AllSlatesEvaluation):
 
 def validate_lineup(
     lineup_df,
-    df,  # full projection DataFrame (with salary, positions, game_time)
+    dk_salaries,  # full projection DataFrame (with salary, positions, game_time)
     salary_cap=50000,
     slots_definition=SLOTS,
-    minutes_floor=None,  # e.g., 22
+    minutes_floor=None,
     locked=None,  # dict {player_key: required_slot_name}
     now_mt=None,  # optional; for game-time validation
 ):
@@ -463,7 +474,15 @@ def validate_lineup(
     # ---------------------
     # Salary cap
     # ---------------------
-    merged = lineup_df.merge(df, on="player_key", how="left", validate="one_to_one")
+    merged = lineup_df.merge(
+        dk_salaries,
+        on="player_key",
+        how="left",
+        validate="one_to_one",
+        suffixes=("", "_dk"),
+    )
+    merged["salary"] = merged["salary_dk"]
+    merged = merged.drop(columns=["salary_dk"])
     total_salary = merged["salary"].sum()
 
     if total_salary > salary_cap:
@@ -488,6 +507,19 @@ def validate_lineup(
                 f"Illegal assignment: {row['player_key']} plays {player_positions} "
                 f"but placed in {row['slot']} which allows {allowed}."
             )
+
+    # ---------------------
+    # Must include players from at least two different games
+    # ---------------------
+    game_ids = lineup_df["game_info"].apply(extract_game_id)
+
+    unique_games = set(game_ids)
+
+    if len(unique_games) < 2:
+        print(lineup_df.to_string())
+        errors.append(
+            f"Lineup uses players from only one game: {unique_games}. Must use at least two."
+        )
 
     # ---------------------
     # Locked player constraints
@@ -967,15 +999,17 @@ def evaluate_slate(
         id=slate.slate_id,
     )
 
-    blend_proj, etr_proj, rg_proj, slate_games = load_projections(
-        meta, remove_nan=False
-    )
+    etr_proj, rg_proj, slate_games = load_projections(meta, remove_nan=False)
+    dk_salaries = load_dk_salaries_csv(meta)
+    blend_proj = blend_projections(rg_proj, etr_proj)
 
     _, results_players_df = load_results_csv(slate)
     rg_merged = join_proj_results(rg_proj, results_players_df, id_col=id_col)
     etr_merged = join_proj_results(etr_proj, results_players_df, id_col=id_col)
     blend_merged = join_proj_results(blend_proj, results_players_df, id_col=id_col)
-    top_lineups = load_candidates(slate, blend_merged, etr_merged, rg_merged)
+    top_lineups = load_candidates(
+        meta, blend_merged, etr_merged, rg_merged, dk_salaries
+    )
 
     contest_results: List[ContestResult] = []
 

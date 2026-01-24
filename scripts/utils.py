@@ -192,19 +192,38 @@ def blend_projections(
         }
     )
 
-    # 2. Merge on player_name (inner join ensures both sites project the player)
-    blend = rg.merge(etr, on="player_name", how="inner")
+    # Merge on player_name (inner join ensures both sites project the player)
+    blend = rg.merge(etr, on="player_key", how="inner")
 
-    # 3. Create blended + min columns
+    # Create blended + min columns
     blend["proj_fpts"] = weight_rg * blend["rg_fpts"] + weight_etr * blend["etr_fpts"]
 
     blend["proj_minutes"] = blend[["rg_minutes", "etr_minutes"]].min(axis=1)
     blend["ceiling"] = blend["ceiling_x"]
-    blend["player_key"] = blend["player_key_x"]
+    blend["player_name"] = blend["player_name_x"]
     blend["position"] = blend["position_x"]
     blend["positions"] = blend["positions_x"]
     blend["salary"] = blend["salary_x"]
     blend["team"] = blend["team_x"]
+    cols_to_drop = [
+        "etr_fpts",
+        "etr_minutes",
+        "rg_fpts",
+        "rg_minutes",
+        "player_name_x",
+        "player_name_y",
+        "salary_x",
+        "salary_y",
+        "position_x",
+        "position_y",
+        "positions_x",
+        "positions_y",
+        "ceiling_x",
+        "ceiling_y",
+        "team_x",
+        "team_y",
+    ]
+    blend = blend.drop(columns=cols_to_drop)
 
     return blend
 
@@ -224,13 +243,13 @@ def ensure_output_path(path_str: str) -> Path:
 def get_proj_cols(proj_source: str) -> List[str]:
     if proj_source == "rg":
         return RG_PROJ_COLS
-    elif proj_source == "etr":
+    elif proj_source == "etr" or proj_source == "blend":
         return ETR_PROJ_COLS
     else:
         raise ValueError("Invalid projection source.")
 
 
-def load_dk_salaries_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
+def load_dk_salaries_csv(meta: SlateMeta) -> tuple[pd.DataFrame, int, list[str]]:
     cols = [
         "player_name",
         "salary",
@@ -238,7 +257,16 @@ def load_dk_salaries_csv(path: Path) -> tuple[pd.DataFrame, int, list[str]]:
         "team",
         "game_info",
     ]
-    df = pd.read_csv(path)
+
+    dk_salaries_path = (
+        DK_SALARIES_DIR
+        / f"{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.date}.csv"
+    )
+
+    if not dk_salaries_path.is_file():
+        raise FileNotFoundError(f"DK salaries file not found '{dk_salaries_path}'")
+
+    df = pd.read_csv(dk_salaries_path)
 
     df = normalize_columns(
         df,
@@ -292,7 +320,12 @@ def load_projection_csv(
         df["floor"] = coerce_numeric(df["floor"])
 
     if remove_nan:
-        df = df.dropna(subset=cols)
+        remove_nan_cols = [
+            "player_name",
+            "proj_minutes",
+            "proj_fpts",
+        ]
+        df = df.dropna(subset=remove_nan_cols)
     else:
         df["projection_missing"] = df["proj_fpts"].isna() | df["proj_minutes"].isna()
         df["proj_fpts_filled"] = df["proj_fpts"].fillna(0.0)
@@ -334,11 +367,10 @@ def load_projections(slate: SlateMeta, remove_nan: bool):
     if not rg_proj_path.is_file():
         raise FileNotFoundError(f"RG projection file not found '{rg_proj_path}'")
 
-    rg_proj, slate_games = load_projection_csv(rg_proj_path, remove_nan=False)
-    etr_proj, _ = load_projection_csv(etr_proj_path, remove_nan=False)
-    blend_proj = blend_projections(rg_proj, etr_proj)
+    rg_proj, slate_games = load_projection_csv(rg_proj_path, remove_nan=remove_nan)
+    etr_proj, _ = load_projection_csv(etr_proj_path, remove_nan=remove_nan)
 
-    return blend_proj, etr_proj, rg_proj, slate_games
+    return etr_proj, rg_proj, slate_games
 
 
 def normalize_columns(

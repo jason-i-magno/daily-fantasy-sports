@@ -115,10 +115,10 @@ def main(argv: Iterable[str]) -> int:
             / f"{slate.sport}_{slate.slate}_{slate.site}_candidate_lineups_{slate.date}.json"
         )
 
-        k_lineups = 100
-        generate_blend_candidates = False
-        generate_etr_candidates = False
-        generate_rg_candidates = False
+        k_lineups = 10
+        generate_blend_candidates = True
+        generate_etr_candidates = True
+        generate_rg_candidates = True
 
         if blend_candidates_path.exists():
             last_modified = datetime.fromtimestamp(

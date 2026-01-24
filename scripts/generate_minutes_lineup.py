@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,10 +21,10 @@ import pandas as pd
 import pulp
 from utils import (
     CANDIDATE_LINEUPS_DIR,
-    DK_SALARIES_DIR,
     SLOTS,
     ResultsFileMeta,
     adjusted_score,
+    blend_projections,
     get_proj_cols,
     load_dk_salaries_csv,
     load_projections,
@@ -34,9 +33,15 @@ from utils import (
     total_fragile_minutes,
 )
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
+def add_game_id_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # Example game_info:  "LAL@SAC 01/12/2026 10:00PM ET"
+    df = df.copy()
+    df["game_id"] = df["game_info"].apply(lambda x: x.split()[0])
+    return df
 
 
 def build_player_index_map(
@@ -208,6 +213,43 @@ def build_ilp_with_slots(
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
 
+    # -------------------------------------------
+    # Game diversity: require players from >= 2 games
+    # -------------------------------------------
+    player_game_idx = df["game_idx"].tolist()
+    unique_games = sorted(df["game_idx"].unique())
+    n_slots = len(SLOTS)
+
+    # Map each game -> list of player indices in that game
+    game_to_players: dict[int, list[int]] = {g: [] for g in unique_games}
+    for i, gi in enumerate(player_game_idx):
+        game_to_players[gi].append(i)
+
+    # Binary indicator: game_used[g] == 1 if any player from game g is in the lineup
+    g_used = {g: pulp.LpVariable(f"game_used_{g}", cat="Binary") for g in unique_games}
+
+    # Link players <-> game_used:
+    # If any player from game g is used, game_used[g] must be 1.
+    # If game_used[g] is 1, at least one player from game g must be used.
+    MAX_FROM_ONE_GAME = len(SLOTS)  # at most 8 roster spots total
+
+    for g, players_in_game in game_to_players.items():
+        if not players_in_game:
+            continue
+
+        total_from_game = pulp.lpSum(
+            y[(i, s)] for i in players_in_game for s in range(n_slots)
+        )
+
+        # Upper bound: cannot use players from game g unless game_used[g] == 1
+        prob += total_from_game <= MAX_FROM_ONE_GAME * g_used[g]
+
+        # Lower bound: if game_used[g] == 1, must take at least one player
+        prob += total_from_game >= g_used[g]
+
+    # Require at least 2 distinct games to have players
+    prob += pulp.lpSum(g_used[g] for g in unique_games) >= 2
+
     # ------------------------------
     # Lock specific players into slots
     # ------------------------------
@@ -268,12 +310,18 @@ def solve_top_k_lineups(
 
         lineup_df = extract_lineup(df, y, proj_source)
         total_minutes = lineup_df["proj_minutes"].sum()
+        SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
+        lineup = lineup_df.copy()
+        lineup["slot"] = pd.Categorical(
+            lineup["slot"], categories=SLOT_ORDER, ordered=True
+        )
+        sorted_lineup = lineup.sort_values("slot")
 
         lineups.append(
             {
                 "rank": n + 1,
                 "total_minutes": total_minutes,
-                "lineup": lineup_df.copy(),
+                "lineup": sorted_lineup.copy(),
             }
         )
 
@@ -340,99 +388,63 @@ def generate_lineups(
     output_file: str = "data/processed/dk_max_minutes_lineup.csv",
 ):
     meta = parse_slate_id(slate_id)
-    print(meta.id)
+    etr_df, rg_df, slate_games = load_projections(meta, remove_nan=True)
+    blend_df = blend_projections(rg_df, etr_df)
 
-    dk_salaries_path = (
-        DK_SALARIES_DIR
-        / f"{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.date}.csv"
+    working_df = None
+    if projection_source == "rg":
+        working_df = rg_df.copy()
+    elif projection_source == "etr":
+        working_df = etr_df.copy()
+    elif projection_source == "blend":
+        working_df = blend_df.copy()
+    else:
+        raise ValueError("Invalid projection source")
+
+    dk_df = load_dk_salaries_csv(meta)
+
+    # Filter out players not in the current slate
+    working_df = working_df[working_df["player_key"].isin(set(dk_df["player_key"]))]
+
+    # Replace positions column with DK positions
+    working_df["positions"] = working_df["player_key"].map(
+        dk_df.set_index("player_key")["positions"]
     )
 
-    if not dk_salaries_path.is_file():
-        logging.error(f"DK salaries file not found '{dk_salaries_path}'")
+    # Replace salary column with DK salary
+    working_df["salary"] = working_df["player_key"].map(
+        dk_df.set_index("player_key")["salary"]
+    )
 
-        return 1
+    # Merge in game info column
+    working_df["game_info"] = working_df["player_key"].map(
+        dk_df.set_index("player_key")["game_info"]
+    )
 
-    blend, etr_df, rg_df, slate_games = load_projections(meta, remove_nan=True)
+    # Merge in local game time column
+    working_df["game_time_local"] = working_df["player_key"].map(
+        dk_df.set_index("player_key")["game_time_local"]
+    )
 
-    etr_slate_df = etr_df[etr_df["player_key"].isin(rg_df["player_key"])].copy()
+    working_df = add_game_id_columns(working_df)
 
-    if dk_salaries_path.is_file():
-        dk_df = load_dk_salaries_csv(dk_salaries_path)
+    unique_games = sorted(working_df["game_id"].unique())
+    game_index = {g: j for j, g in enumerate(unique_games)}
 
-        # Replace ETR positions column with DK positions
-        positions_lookup = dk_df[["player_key", "positions"]]
-        etr_slate_df = etr_slate_df.merge(
-            positions_lookup, on="player_key", how="left", suffixes=("", "_dk")
-        )
-        etr_slate_df["positions"] = etr_slate_df["positions_dk"]
-        etr_slate_df = etr_slate_df.drop(columns=["positions_dk"])
+    working_df["game_idx"] = working_df["game_id"].map(game_index)
 
-        # Replace RG positions column with DK positions
-        rg_df = rg_df.merge(
-            positions_lookup, on="player_key", how="left", suffixes=("", "_dk")
-        )
-        rg_df["positions"] = rg_df["positions_dk"]
-        rg_df = rg_df.drop(columns=["positions_dk"])
-
-        # Replace ETR salary column with DK salary
-        salary_lookup = dk_df[["player_key", "salary"]]
-        etr_slate_df = etr_slate_df.merge(
-            salary_lookup, on="player_key", how="left", suffixes=("", "_dk")
-        )
-        etr_slate_df["salary"] = etr_slate_df["salary_dk"]
-        etr_slate_df = etr_slate_df.drop(columns=["salary_dk"])
-
-        # Replace RG salary column with DK salary
-        rg_df = rg_df.merge(
-            salary_lookup, on="player_key", how="left", suffixes=("", "_dk")
-        )
-        rg_df["salary"] = rg_df["salary_dk"]
-        rg_df = rg_df.drop(columns=["salary_dk"])
-
-        # Merge in local game time column
-        dk_subset = dk_df[["player_key", "game_time_local"]].copy()
-        rg_df = rg_df.merge(dk_subset, on="player_key", how="left")
-        etr_slate_df = etr_slate_df.merge(dk_subset, on="player_key", how="left")
-    else:
-        # Replace ETR salary column with RG salary
-        salary_lookup = rg_df[["player_key", "salary"]]
-        etr_slate_df = etr_slate_df.merge(
-            salary_lookup, on="player_key", how="left", suffixes=("", "_rg")
-        )
-        etr_slate_df["salary"] = etr_slate_df["salary_rg"]
-        etr_slate_df = etr_slate_df.drop(columns=["salary_rg"])
-
-        # Replace ETR positions column with RG positions
-        positions_lookup = rg_df[["player_key", "positions"]]
-        etr_slate_df = etr_slate_df.merge(
-            positions_lookup, on="player_key", how="left", suffixes=("", "_rg")
-        )
-        etr_slate_df["positions"] = etr_slate_df["positions_rg"]
-        etr_slate_df = etr_slate_df.drop(columns=["positions_rg"])
-
-    # Players in ETR but not RG (still on slate teams)
-    extra_etr_players = set(etr_slate_df["player_key"]) - set(rg_df["player_key"])
-    print(f"{extra_etr_players=}")
-
-    # Players in RG but missing from ETR
-    missing_rg_players = set(rg_df["player_key"]) - set(etr_slate_df["player_key"])
-    print(f"{missing_rg_players=}")
-
-    if projection_source == "rg":
-        df = rg_df
-    elif projection_source == "etr":
-        df = etr_slate_df
-    elif projection_source == "blend":
-        df = blend
+    working_df = working_df.reset_index(drop=True)
 
     locked = {}
+    # locked = {
+    #     "jaylenbrown": "SF",
+    # }
     locked_keys = set(locked.keys())
-    working_df = df
     if locked:
         now_mt = datetime.now(ZoneInfo("America/Denver"))
-        working_df = df[
-            (df["player_key"].isin(locked_keys))
-            | (df["game_time_local"] > now_mt - timedelta(minutes=0))
+        working_df = working_df[
+            (working_df["player_key"].isin(locked_keys))
+            | (working_df["game_time_local"] > now_mt - timedelta(minutes=0))
         ].reset_index(drop=True)
 
     locked_assignments = {}
@@ -441,18 +453,31 @@ def generate_lineups(
             working_df.index[working_df["player_key"] == player_key][0]
         ] = slot_index[position]
 
+    # Generate top k maximum minutes lineups
+    top_minutes_lineup = solve_top_k_lineups(
+        working_df,
+        proj_source=projection_source,
+        k=1,
+        maximize_fpts=False,
+        locked_assignments=locked_assignments,
+    )[0]
+
+    # # Generate top k maximum FPTs lineus
+    top_fpts_lineup = solve_top_k_lineups(
+        working_df,
+        proj_source=projection_source,
+        k=1,
+        maximize_fpts=True,
+        locked_assignments=locked_assignments,
+    )[0]
+
     # Generate top k adjusted lineups
     # Disallow any player under minutes floor.
-    # working_df = working_df[working_df["proj_minutes"] >= 22].reset_index(drop=True)
-
-    locked_assignments = {}
-    for player_key, position in locked.items():
-        locked_assignments[
-            working_df.index[working_df["player_key"] == player_key][0]
-        ] = slot_index[position]
+    adjusted_df = working_df.copy()
+    adjusted_df = adjusted_df[adjusted_df["proj_minutes"] >= 22].reset_index(drop=True)
 
     adjusted_lineups = solve_top_k_lineups(
-        working_df,
+        adjusted_df,
         proj_source=projection_source,
         k=k_lineups,
         maximize_fpts=True if maximize_fpts else False,
@@ -474,9 +499,19 @@ def generate_lineups(
         adjusted_lineups, key=lambda x: x["adjusted_score"], reverse=True
     )
 
-    top_adjusted_player_keys = [
-        lineup_df_to_player_keys(lu["lineup"]) for lu in adjusted_lineups
-    ]
+    with open(output_file, "w") as out_file:
+        # Write max minute lineup info to output file
+        out_file.write("\nMax Minutes Lineup ")
+        write_lineup(top_minutes_lineup["lineup"], projection_source, out_file)
+
+        # # Write max fpts lineup info to output file
+        out_file.write("\nMax FPTS Lineup ")
+        write_lineup(top_fpts_lineup["lineup"], projection_source, out_file)
+
+        # Print top k lineups to stdout and write them to the output file
+        for i, lineup in enumerate(adjusted_lineups):
+            out_file.write(f"\nLineup #{i} ")
+            write_lineup(lineup["lineup"], projection_source, out_file)
 
     if projection_source == "rg":
         candidate_subdir = "rotogrinders"
@@ -484,6 +519,10 @@ def generate_lineups(
         candidate_subdir = "etr"
     elif projection_source == "blend":
         candidate_subdir = "blend"
+
+    top_adjusted_player_keys = [
+        lineup_df_to_player_keys(lu["lineup"]) for lu in adjusted_lineups
+    ]
 
     if patch_candidate_lineups:
         patch_filename = (
@@ -536,38 +575,6 @@ def generate_lineups(
             top_minutes_player_keys=top_minutes_player_keys,
             top_adjusted_player_keys=top_adjusted_player_keys,
         )
-
-    # Generate top k maximum minutes lineups
-    top_minutes_lineup = solve_top_k_lineups(
-        working_df,
-        proj_source=projection_source,
-        k=1,
-        maximize_fpts=False,
-        locked_assignments=locked_assignments,
-    )[0]
-
-    # Generate top k maximum FPTs lineus
-    top_fpts_lineup = solve_top_k_lineups(
-        working_df,
-        proj_source=projection_source,
-        k=1,
-        maximize_fpts=True,
-        locked_assignments=locked_assignments,
-    )[0]
-
-    with open(output_file, "w") as out_file:
-        # Write max minute lineup info to output file
-        out_file.write("\nMax Minutes Lineup ")
-        write_lineup(top_minutes_lineup["lineup"], projection_source, out_file)
-
-        # Write max fpts lineup info to output file
-        out_file.write("\nMax FPTS Lineup ")
-        write_lineup(top_fpts_lineup["lineup"], projection_source, out_file)
-
-        # Print top k lineups to stdout and write them to the output file
-        for i, lineup in enumerate(adjusted_lineups):
-            out_file.write(f"\nLineup #{i} ")
-            write_lineup(lineup["lineup"], projection_source, out_file)
 
 
 def main(argv: Iterable[str]) -> int:
