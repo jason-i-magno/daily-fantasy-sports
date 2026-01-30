@@ -44,7 +44,11 @@ _FILENAME_RE = re.compile(
     (?:_(?P<source>[a-z]+))?
     _
     (?P<datatype>[a-z\-]+)_
-    (?P<date>\d{4}-\d{2}-\d{2})
+    (?P<datetime>
+        \d{4}-\d{2}-\d{2}
+        (?:T\d{4})?
+        (?:[+-]\d{4})?
+    )
     $
     """,
     re.VERBOSE,
@@ -56,7 +60,11 @@ _SLATE_ID_RE = re.compile(
     (?P<sport>[a-z]+)_
     (?P<slate>[a-z0-9\-]+)_
     (?P<site>[a-z]+)_
-    (?P<date>\d{4}-\d{2}-\d{2})
+    (?P<datetime>
+        \d{4}-\d{2}-\d{2}
+        (?:T\d{4})?
+        (?:[+-]\d{4})?
+    )
     $
     """,
     re.VERBOSE,
@@ -93,6 +101,8 @@ SLOTS: List[Dict] = [
     {"name": "UTIL", "allowed": None},
 ]
 
+SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
+
 # Projection Columns
 RG_PROJ_COLS = [
     "player_name",
@@ -125,7 +135,7 @@ class ResultsFileMeta:
     site: str
     source: str
     datatype: str
-    date: str  # ISO yyyy-mm-dd
+    datetime: str
     slate_id: str
 
 
@@ -134,7 +144,7 @@ class SlateMeta:
     sport: str
     slate: str
     site: str
-    date: str  # ISO yyyy-mm-dd
+    datetime: str
     id: str
 
 
@@ -249,6 +259,16 @@ def get_proj_cols(proj_source: str) -> List[str]:
         raise ValueError("Invalid projection source.")
 
 
+def lineup_df_to_player_keys(
+    lineup_df: pd.DataFrame,
+    id_col: str = "player_name",
+) -> list[int]:
+    player_keys = []
+    for name in lineup_df[id_col]:
+        player_keys.append(normalize_name(name))
+    return player_keys
+
+
 def load_dk_salaries_csv(meta: SlateMeta) -> tuple[pd.DataFrame, int, list[str]]:
     cols = [
         "player_name",
@@ -257,10 +277,9 @@ def load_dk_salaries_csv(meta: SlateMeta) -> tuple[pd.DataFrame, int, list[str]]
         "team",
         "game_info",
     ]
-
     dk_salaries_path = (
         DK_SALARIES_DIR
-        / f"{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.date}.csv"
+        / f"{meta.sport}_{meta.slate}_{meta.site}_salaries_{meta.datetime.split('T')[0]}.csv"
     )
 
     if not dk_salaries_path.is_file():
@@ -284,7 +303,10 @@ def load_dk_salaries_csv(meta: SlateMeta) -> tuple[pd.DataFrame, int, list[str]]
 
 
 def load_projection_csv(
-    path: Path, remove_nan: bool = True
+    path: Path,
+    dk_df: pd.DataFrame = None,
+    remove_nan: bool = True,
+    locked_players: dict = {},
 ) -> tuple[pd.DataFrame, int]:
     source = None
 
@@ -319,6 +341,59 @@ def load_projection_csv(
     if source == "rg":
         df["floor"] = coerce_numeric(df["floor"])
 
+    # ----------------------------------------
+    # OVERRIDE missing projections for locked players
+    # ----------------------------------------
+    if locked_players:
+        locked_keys = set(locked_players.keys())
+
+        for key in locked_keys:
+            mask = df["player_key"] == key
+
+            # Only override if missing (NaN)
+            if df.loc[mask, "proj_minutes"].isna().any():
+                df.loc[mask, "proj_minutes"] = 0.0
+
+            if df.loc[mask, "proj_fpts"].isna().any():
+                df.loc[mask, "proj_fpts"] = 0.0
+
+            if df.loc[mask, "ceiling"].isna().any():
+                df.loc[mask, "ceiling"] = 0.0
+
+            if source == "rg":
+                if df.loc[mask, "floor"].isna().any():
+                    df.loc[mask, "floor"] = 0.0
+
+        # Players missing entirely from projection file
+        missing_keys = locked_keys - set(df["player_key"])
+
+        if missing_keys:
+            # You MUST have DK salary dataframe accessible here
+            # dk_df must contain: player_key, salary, positions, team, game_info, etc.
+            # Add dk_df as a function argument if needed.
+            for key in missing_keys:
+                dk_row = dk_df[dk_df["player_key"] == key]
+                if dk_row.empty:
+                    raise ValueError(f"Locked player {key} missing from DK salaries.")
+
+                # Build a fallback projection row
+                new_row = {
+                    "player_name": dk_row["player_name"].iloc[0],
+                    "player_key": key,
+                    "salary": dk_row["salary"].iloc[0],
+                    "proj_minutes": 0.0,  # median or default
+                    "proj_fpts": 0.0,
+                    "positions": dk_row["positions"].iloc[0],
+                    "team": dk_row["team"].iloc[0],
+                    "ceiling": 0.0,
+                }
+
+                # RG-only column, optional
+                if "floor" in df.columns:
+                    new_row["floor"] = 0.0
+
+                df.loc[len(df)] = new_row
+
     if remove_nan:
         remove_nan_cols = [
             "player_name",
@@ -350,10 +425,15 @@ def load_projection_csv(
     return df.reset_index(drop=True), slate_games
 
 
-def load_projections(slate: SlateMeta, remove_nan: bool):
+def load_projections(
+    slate: SlateMeta,
+    dk_df: pd.DataFrame = None,
+    remove_nan: bool = True,
+    locked_players: dict = {},
+):
     etr_proj_path = (
         ETR_PROJ_DIR
-        / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.date}.csv"
+        / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.datetime}.csv"
     )
 
     if not etr_proj_path.is_file():
@@ -361,14 +441,18 @@ def load_projections(slate: SlateMeta, remove_nan: bool):
 
     rg_proj_path = (
         RG_PROJ_DIR
-        / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.date}.csv"
+        / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.datetime}.csv"
     )
 
     if not rg_proj_path.is_file():
         raise FileNotFoundError(f"RG projection file not found '{rg_proj_path}'")
 
-    rg_proj, slate_games = load_projection_csv(rg_proj_path, remove_nan=remove_nan)
-    etr_proj, _ = load_projection_csv(etr_proj_path, remove_nan=remove_nan)
+    rg_proj, slate_games = load_projection_csv(
+        rg_proj_path, dk_df=dk_df, remove_nan=remove_nan, locked_players=locked_players
+    )
+    etr_proj, _ = load_projection_csv(
+        etr_proj_path, dk_df=dk_df, remove_nan=remove_nan, locked_players=locked_players
+    )
 
     return etr_proj, rg_proj, slate_games
 
@@ -418,7 +502,7 @@ def parse_filename(path: str | Path) -> ResultsFileMeta:
 
     parts = match.groupdict()
 
-    slate_id = f"{parts['sport']}_{parts['slate']}_{parts['site']}_{parts['date']}"
+    slate_id = f"{parts['sport']}_{parts['slate']}_{parts['site']}_{parts['datetime']}"
 
     return ResultsFileMeta(
         sport=parts["sport"],
@@ -426,7 +510,7 @@ def parse_filename(path: str | Path) -> ResultsFileMeta:
         site=parts["site"],
         source=parts["source"],
         datatype=parts["datatype"],
-        date=parts["date"],
+        datetime=parts["datetime"],
         slate_id=slate_id,
     )
 
@@ -476,7 +560,7 @@ def parse_slate_id(slate_id: str) -> SlateMeta:
         sport=parts["sport"],
         slate=parts["slate"],
         site=parts["site"],
-        date=parts["date"],
+        datetime=parts["datetime"],
         id=slate_id,
     )
 

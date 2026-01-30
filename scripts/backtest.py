@@ -23,9 +23,12 @@ import pandas as pd
 from utils import (
     BLEND_CANDIDATE_DIR,
     ETR_CANDIDATE_DIR,
+    ETR_PROJ_DIR,
     H2H_DIR,
     RESULTS_DIR,
     RG_CANDIDATE_DIR,
+    RG_PROJ_DIR,
+    SLOT_ORDER,
     SLOTS,
     ResultsFileMeta,
     SlateMeta,
@@ -66,6 +69,8 @@ class AllSlatesEvaluation:
         default_factory=AggregateLineupMetrics
     )
     num_slates: int = 0
+    n_late_swap_slates: int = 0
+    n_missing_late_swap_proj: int = 0
 
 
 @dataclasses.dataclass
@@ -131,6 +136,8 @@ class SlateResult:
     blend: LineupResult = dataclasses.field(default_factory=LineupResult)
     etr: LineupResult = dataclasses.field(default_factory=LineupResult)
     rg: LineupResult = dataclasses.field(default_factory=LineupResult)
+    has_late_swaps: bool = True
+    missing_late_swap_proj: bool = False
 
 
 @dataclasses.dataclass
@@ -168,18 +175,14 @@ def extract_game_id(game_info: str) -> str:
     return game_info.split()[0]
 
 
-def join_proj_results(
-    proj: pd.DataFrame, results: pd.DataFrame, id_col: str = "player_key"
-) -> pd.DataFrame:
-    merged = proj.merge(
-        results[[id_col, "FPTS"]], on=id_col, how="left", indicator=True
-    )
-    missing_actuals = merged[merged["_merge"] == "left_only"][id_col].tolist()
-    if missing_actuals:
-        logger.debug("Missing actuals for players: %s", missing_actuals)
-    merged = merged.drop(columns=["_merge"])
-    merged["FPTS"] = merged["FPTS"].fillna(0.0)
-    return merged
+def join_proj_results(proj: pd.DataFrame, results: pd.DataFrame) -> pd.DataFrame:
+    lookup = results.set_index("player_key")
+
+    # Merge in FPTScolumn
+    proj["FPTS"] = proj["player_key"].map(lookup["FPTS"])
+    # proj["FPTS"] = proj["FPTS"].fillna(0.0)
+
+    return proj
 
 
 def lineup_from_keys(player_keys: list[str], dk_salaries: pd.DataFrame):
@@ -189,8 +192,6 @@ def lineup_from_keys(player_keys: list[str], dk_salaries: pd.DataFrame):
     """
     if len(player_keys) != 8:
         raise ValueError("Lineup must contain exactly 8 players.")
-
-    SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
 
     # Map each player_key → slot
     lookup = dk_salaries.set_index("player_key")
@@ -211,7 +212,7 @@ def lineup_from_keys(player_keys: list[str], dk_salaries: pd.DataFrame):
 
 def load_h2h_results(slate: ResultsFileMeta, results_df: pd.DataFrame) -> H2HResults:
     h2h_path = (
-        H2H_DIR / f"{slate.sport}_{slate.slate}_{slate.site}_h2h_{slate.date}.json"
+        H2H_DIR / f"{slate.sport}_{slate.slate}_{slate.site}_h2h_{slate.datetime}.json"
     )
 
     with open(h2h_path, "r") as f:
@@ -246,7 +247,11 @@ def load_h2h_results(slate: ResultsFileMeta, results_df: pd.DataFrame) -> H2HRes
 
 
 def load_candidate_lineups(
-    meta: SlateMeta, proj_source: str, proj: pd.DataFrame, dk_salaries: pd.DataFrame
+    meta: SlateMeta,
+    proj_source: str,
+    proj: pd.DataFrame,
+    dk_salaries: pd.DataFrame,
+    use_late_swaps: bool,
 ) -> Tuple[List[Lineup], List[Lineup], List[Lineup]]:
     candidate_dirs = {
         "blend": BLEND_CANDIDATE_DIR,
@@ -255,8 +260,17 @@ def load_candidate_lineups(
     }
     candidate_lineups_path = (
         candidate_dirs[proj_source]
-        / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.date}.json"
+        / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
     )
+
+    if use_late_swaps:
+        game_times = sorted(
+            dk_salaries.set_index("player_key")["game_time_local"].unique()
+        )
+        candidate_lineups_path = (
+            candidate_dirs[proj_source]
+            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}T{game_times[-1].strftime('%H%M')}.json"
+        )
 
     with open(candidate_lineups_path, "r") as f:
         payload = json.load(f)
@@ -304,24 +318,24 @@ def load_candidate_lineups(
 
 
 def load_candidates(
-    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries
+    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries, use_late_swaps
 ) -> TopLineups:
     lineups = TopLineups()
     (
         lineups.rg_fpts,
         lineups.rg_minutes,
         lineups.rg_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries)
+    ) = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries, use_late_swaps)
     (
         lineups.etr_fpts,
         lineups.etr_minutes,
         lineups.etr_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries)
+    ) = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries, use_late_swaps)
     (
         lineups.blend_fpts,
         lineups.blend_minutes,
         lineups.blend_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries)
+    ) = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries, use_late_swaps)
 
     return lineups
 
@@ -332,7 +346,7 @@ def load_results_csv(slate: ResultsFileMeta) -> pd.DataFrame:
     """
     results_path = (
         RESULTS_DIR
-        / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.date}.csv"
+        / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.datetime}.csv"
     )
 
     raw = pd.read_csv(results_path, dtype=str)
@@ -392,7 +406,12 @@ def lineup_from_player_keys(
     # rg_floor = float(lineup_df["floor"].sum())
     rg_floor = 0
     fragile_count = int((lineup_df["proj_minutes"] < 30).sum())
+
+    if lineup_df["FPTS"].isna().any():
+        print(lineup_df.to_string())
+        raise ValueError("Lineup contains NaN FPTS values")
     actual_fpts = float(lineup_df["FPTS"].sum())
+
     return Lineup(
         players=players,
         projected_fpts=projected_fpts,
@@ -418,7 +437,9 @@ def print_evaluation(eval: AllSlatesEvaluation):
         "max_fpts_winnings",
     ]
 
-    print(f"\nEvaluated {eval.num_slates} slates\n")
+    print(f"\nEvaluated {eval.num_slates} slates")
+    print(f"Slates with late swaps: {eval.n_late_swap_slates}")
+    print(f"Slates missing late swap projections: {eval.n_missing_late_swap_proj}\n")
 
     for model in models:
         metrics = getattr(eval, model)
@@ -959,7 +980,11 @@ def aggregate_slate_results(results: list[SlateResult]) -> AllSlatesEvaluation:
     ]
 
     for index, slate in enumerate(results, start=1):
-        agg.num_slates = index
+        if slate.has_late_swaps:
+            agg.n_late_swap_slates += 1
+
+            if slate.missing_late_swap_proj:
+                agg.n_missing_late_swap_proj += 1
 
         for model_name in ("blend", "etr", "rg"):
             src = getattr(slate, model_name)  # LineupResult
@@ -995,20 +1020,60 @@ def evaluate_slate(
         sport=slate.sport,
         slate=slate.slate,
         site=slate.site,
-        date=slate.date,
+        datetime=slate.datetime,
         id=slate.slate_id,
     )
 
-    etr_proj, rg_proj, slate_games = load_projections(meta, remove_nan=False)
     dk_salaries = load_dk_salaries_csv(meta)
+
+    game_times = sorted(dk_salaries.set_index("player_key")["game_time_local"].unique())
+
+    n_games = len(game_times)
+    slate_result = SlateResult()
+
+    if n_games == 1:
+        slate_result.has_late_swaps = False
+        logging.info("No late swaps")
+
+    for i in range(1, len(game_times)):
+        lock_time = game_times[i].strftime("%H%M")
+        etr_proj_path = (
+            ETR_PROJ_DIR
+            / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.datetime}T{lock_time}.csv"
+        )
+
+        if not etr_proj_path.is_file():
+            slate_result.missing_late_swap_proj = True
+
+            logging.info("Missing ETR late swap projections.")
+            break
+
+        rg_proj_path = (
+            RG_PROJ_DIR
+            / f"{slate.sport}_{slate.slate}_{slate.site}_rg_projections_{slate.datetime}T{lock_time}.csv"
+        )
+
+        if not rg_proj_path.is_file():
+            slate_result.missing_late_swap_proj = True
+
+            logging.info("Missing RG late swap projections.")
+            break
+
+    etr_proj, rg_proj, slate_games = load_projections(meta, remove_nan=False)
     blend_proj = blend_projections(rg_proj, etr_proj)
 
     _, results_players_df = load_results_csv(slate)
-    rg_merged = join_proj_results(rg_proj, results_players_df, id_col=id_col)
-    etr_merged = join_proj_results(etr_proj, results_players_df, id_col=id_col)
-    blend_merged = join_proj_results(blend_proj, results_players_df, id_col=id_col)
+    rg_merged = join_proj_results(rg_proj, results_players_df)
+    etr_merged = join_proj_results(etr_proj, results_players_df)
+    blend_merged = join_proj_results(blend_proj, results_players_df)
     top_lineups = load_candidates(
-        meta, blend_merged, etr_merged, rg_merged, dk_salaries
+        meta,
+        blend_merged,
+        etr_merged,
+        rg_merged,
+        dk_salaries,
+        # slate_result.has_late_swaps and not slate_result.missing_late_swap_proj,
+        False,
     )
 
     contest_results: List[ContestResult] = []
@@ -1024,7 +1089,6 @@ def evaluate_slate(
 
     # Evaluate strategies against H2H contests
     h2h_results = load_h2h_results(slate, rg_merged)
-    slate_result = SlateResult()
 
     (
         results,
@@ -1089,7 +1153,7 @@ if __name__ == "__main__":
 
     n_slates = len(slates)
 
-    slates.sort(key=lambda x: x.date)
+    slates.sort(key=lambda x: x.datetime)
 
     contest_results = []
     opponent_results = []
