@@ -458,14 +458,14 @@ def main(argv: Iterable[str]) -> int:
 
     locked_players = {}
     # locked_players = {
-    #     "reedsheppard": "PG",
-    #     "dennisschroder": "SG",
-    #     "kevinhuerter": "SF",
-    #     "bobbyportis": "PF",
-    #     "nikolavucevic": "C",
-    #     "ryanrollins": "G",
+    #     "derrickwhite": "PG",
+    #     "donovanmitchell": "SG",
+    #     "jakelaravia": "SF",
+    #     # "bobbyportis": "PF",
+    #     "jocklandale": "C",
+    #     "dennisschroder": "G",
     #     # "jordangoodwin": "F",
-    #     "mylesturner": "UTIL",
+    #     "paytonpritchard": "UTIL",
     # }
 
     game_time_filter = datetime.now(MT)
