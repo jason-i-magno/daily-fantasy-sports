@@ -16,10 +16,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 from datetime import datetime
 from typing import List, Set, Tuple
 
 import pandas as pd
+from scipy.stats import beta
 from utils import (
     BLEND_CANDIDATE_DIR,
     ETR_CANDIDATE_DIR,
@@ -62,10 +64,37 @@ class AllSlatesEvaluation:
     blend: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
+    blend_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    blend_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    blend_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
     etr: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
+    etr_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    etr_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    etr_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
     rg: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    rg_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    rg_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    rg_late_swaps: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
     num_slates: int = 0
@@ -180,7 +209,6 @@ def join_proj_results(proj: pd.DataFrame, results: pd.DataFrame) -> pd.DataFrame
 
     # Merge in FPTScolumn
     proj["FPTS"] = proj["player_key"].map(lookup["FPTS"])
-    # proj["FPTS"] = proj["FPTS"].fillna(0.0)
 
     return proj
 
@@ -410,6 +438,8 @@ def lineup_from_player_keys(
     if lineup_df["FPTS"].isna().any():
         print(lineup_df.to_string())
         raise ValueError("Lineup contains NaN FPTS values")
+        # logging.warning("Lineup contains NaN FPTS values")
+
     actual_fpts = float(lineup_df["FPTS"].sum())
 
     return Lineup(
@@ -450,6 +480,51 @@ def print_evaluation(eval: AllSlatesEvaluation):
         for field_name in win_rate_fields:
             print(f"  {field_name}: {getattr(metrics, field_name) * 100:.2f}%")
         print()
+
+    print("===RG Max FPTs===")
+    summarize_win_rate(eval.rg.max_fpts_win_rate * eval.num_slates, eval.num_slates)
+    print(f"Winnings: ${eval.rg.max_fpts_winnings:.2f}")
+
+    print("\n===RG Max FPTs No Late Swaps===")
+    summarize_win_rate(
+        eval.rg_no_late_swaps.max_fpts_win_rate
+        * (eval.num_slates - eval.n_late_swap_slates),
+        eval.num_slates - eval.n_late_swap_slates,
+    )
+    print(f"Winnings: ${eval.rg_no_late_swaps.max_fpts_winnings:.2f}")
+
+    print("\n===RG Max FPTs Late Swaps But Missing Projections===")
+    summarize_win_rate(
+        eval.rg_missing_late_swaps.max_fpts_win_rate * eval.n_missing_late_swap_proj,
+        eval.n_missing_late_swap_proj,
+    )
+    print(f"Winnings: ${eval.rg_missing_late_swaps.max_fpts_winnings:.2f}")
+
+    print("\n===RG Max FPTs Late Swaps But Have Projections===")
+    summarize_win_rate(
+        eval.rg_late_swaps.max_fpts_win_rate
+        * (eval.n_late_swap_slates - eval.n_missing_late_swap_proj),
+        eval.n_late_swap_slates - eval.n_missing_late_swap_proj,
+    )
+    print(f"Winnings: ${eval.rg_late_swaps.max_fpts_winnings:.2f}")
+
+
+def summarize_win_rate(
+    wins: int,
+    n: int,
+    breakeven: float = 0.56,
+):
+    p_win = wins / n if n > 0 else 0.0
+
+    wilson = wilson_interval(wins, n)
+    jeff = jeffreys_interval(wins, n)
+    p_breakeven = prob_beating_breakeven(wins, n)
+
+    print(f"Observed win rate: {p_win:.2%} ({wins}/{n})")
+
+    print(f"Wilson 95% CI:   [{wilson[0]:.2%}, {wilson[1]:.2%}]")
+    print(f"Jeffreys 95% CI: [{jeff[0]:.2%}, {jeff[1]:.2%}]")
+    print(f"P(win rate > 56%) = {p_breakeven:.1%}")
 
 
 def validate_lineup(
@@ -583,17 +658,76 @@ def validate_lineup(
 
 
 # ----------------------------
-# Candidate pool
+# Uncertainty Computation
 # ----------------------------
-def dedupe_lineups(lineups: List[Lineup]) -> List[Lineup]:
-    seen = set()
-    deduped = []
-    for lu in lineups:
-        if lu.players in seen:
-            continue
-        seen.add(lu.players)
-        deduped.append(lu)
-    return deduped
+def jeffreys_interval(
+    wins: int,
+    n: int,
+    confidence: float = 0.95,
+) -> Tuple[float, float]:
+    """
+    Jeffreys credible interval for a Bernoulli proportion.
+    Uses Beta(0.5, 0.5) prior.
+
+    Returns (lower, upper) as floats in [0, 1].
+    """
+    if n == 0:
+        return (0.0, 1.0)
+
+    alpha = wins + 0.5
+    beta_param = n - wins + 0.5
+
+    lower = (1.0 - confidence) / 2.0
+    upper = 1.0 - lower
+
+    return (
+        beta.ppf(lower, alpha, beta_param),
+        beta.ppf(upper, alpha, beta_param),
+    )
+
+
+def prob_beating_breakeven(
+    wins: int,
+    n: int,
+    breakeven: float = 0.56,
+) -> float:
+    """
+    P(true win rate > breakeven) under Jeffreys posterior.
+    """
+    alpha = wins + 0.5
+    beta_param = n - wins + 0.5
+    return 1.0 - beta.cdf(breakeven, alpha, beta_param)
+
+
+def wilson_interval(
+    wins: int,
+    n: int,
+    confidence: float = 0.95,
+) -> Tuple[float, float]:
+    """
+    Wilson score interval for a Bernoulli proportion.
+
+    Returns (lower, upper) as floats in [0, 1].
+    """
+    if n == 0:
+        return (0.0, 1.0)
+
+    z = {
+        0.90: 1.6448536269514722,
+        0.95: 1.959963984540054,
+        0.99: 2.5758293035489004,
+    }.get(confidence)
+
+    if z is None:
+        raise ValueError("Unsupported confidence level")
+
+    p_hat = wins / n
+    denom = 1.0 + (z**2) / n
+
+    center = (p_hat + (z**2) / (2 * n)) / denom
+    margin = z * math.sqrt((p_hat * (1 - p_hat) + (z**2) / (4 * n)) / n) / denom
+
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
 # ----------------------------
@@ -966,52 +1100,125 @@ def aggregate_results(results: List[ContestResult], opponent_results) -> pd.Data
 
 def aggregate_slate_results(results: list[SlateResult]) -> AllSlatesEvaluation:
     agg = AllSlatesEvaluation()
-
     win_rate_fields = [
         "adjusted_fragile_minutes_floor_win_rate",
         "adjusted_fragile_win_rate",
         "max_fpts_win_rate",
     ]
-
     winnings_fields = [
         "adjusted_fragile_minutes_floor_winnings",
         "adjusted_fragile_winnings",
         "max_fpts_winnings",
     ]
 
-    for index, slate in enumerate(results, start=1):
+    for _, slate in enumerate(results, start=1):
+        for model_name in ("blend", "etr", "rg"):
+            update_aggregate_linuep_metrics(
+                model_name, slate, agg, win_rate_fields, winnings_fields
+            )
+
         if slate.has_late_swaps:
             agg.n_late_swap_slates += 1
 
             if slate.missing_late_swap_proj:
                 agg.n_missing_late_swap_proj += 1
 
-        for model_name in ("blend", "etr", "rg"):
-            src = getattr(slate, model_name)  # LineupResult
-            dest = getattr(agg, model_name)  # AggregateLineupMetrics
-
-            if src is None:
-                continue
-
-            # Update win-rate
-            for f in win_rate_fields:
-                old = getattr(dest, f)
-                val = getattr(src, f)
-
-                setattr(dest, f, old + (val - old) / index)
-
-            # Update winnings
-            for f in winnings_fields:
-                setattr(dest, f, getattr(dest, f) + getattr(src, f))
+                for model_name in (
+                    "blend_missing_late_swaps",
+                    "etr_missing_late_swaps",
+                    "rg_missing_late_swaps",
+                ):
+                    update_aggregate_linuep_metrics(
+                        model_name, slate, agg, win_rate_fields, winnings_fields
+                    )
+            else:
+                for model_name in (
+                    "blend_late_swaps",
+                    "etr_late_swaps",
+                    "rg_late_swaps",
+                ):
+                    update_aggregate_linuep_metrics(
+                        model_name, slate, agg, win_rate_fields, winnings_fields
+                    )
+        else:
+            for model_name in (
+                "blend_no_late_swaps",
+                "etr_no_late_swaps",
+                "rg_no_late_swaps",
+            ):
+                update_aggregate_linuep_metrics(
+                    model_name, slate, agg, win_rate_fields, winnings_fields
+                )
 
     agg.num_slates = len(results)
+
+    for model_name in ("blend", "etr", "rg"):
+        dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+        # Update win-rate
+        for f in win_rate_fields:
+            old = getattr(dest, f)
+
+            setattr(dest, f, old / agg.num_slates)
+
+    for model_name in ("blend_no_late_swaps", "etr_no_late_swaps", "rg_no_late_swaps"):
+        dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+        # Update win-rate
+        for f in win_rate_fields:
+            old = getattr(dest, f)
+
+            setattr(dest, f, old / (agg.num_slates - agg.n_late_swap_slates))
+
+    for model_name in (
+        "blend_missing_late_swaps",
+        "etr_missing_late_swaps",
+        "rg_missing_late_swaps",
+    ):
+        dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+        # Update win-rate
+        for f in win_rate_fields:
+            old = getattr(dest, f)
+
+            setattr(dest, f, old / agg.n_missing_late_swap_proj)
+
+    for model_name in (
+        "blend_late_swaps",
+        "etr_late_swaps",
+        "rg_late_swaps",
+    ):
+        dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+        # Update win-rate
+        for f in win_rate_fields:
+            old = getattr(dest, f)
+
+            setattr(
+                dest, f, old / (agg.n_late_swap_slates - agg.n_missing_late_swap_proj)
+            )
     return agg
 
 
-def evaluate_slate(
-    slate: ResultsFileMeta,
-    id_col: str = "player_key",
-) -> pd.DataFrame:
+def update_aggregate_linuep_metrics(
+    model_name, slate, agg, win_rate_fields, winnings_fields
+):
+    src = getattr(slate, model_name.split("_")[0])  # LineupResult
+    dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+    # Update win-rate
+    for f in win_rate_fields:
+        old = getattr(dest, f)
+        val = getattr(src, f)
+
+        setattr(dest, f, old + val)
+
+    # Update winnings
+    for f in winnings_fields:
+        setattr(dest, f, getattr(dest, f) + getattr(src, f))
+
+
+def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
     """
     Example backtest workflow. `top_fpts_indices` and `top_minutes_indices` are lists of
     lineups represented by player indices into the projection dataframe.
@@ -1072,8 +1279,8 @@ def evaluate_slate(
         etr_merged,
         rg_merged,
         dk_salaries,
-        # slate_result.has_late_swaps and not slate_result.missing_late_swap_proj,
-        False,
+        slate_result.has_late_swaps and not slate_result.missing_late_swap_proj,
+        # False,
     )
 
     contest_results: List[ContestResult] = []
