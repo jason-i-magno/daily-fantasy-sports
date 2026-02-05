@@ -295,7 +295,9 @@ def load_dk_salaries_csv(meta: SlateMeta) -> tuple[pd.DataFrame, int, list[str]]
     df["salary"] = coerce_numeric(df["salary"])
     df["positions"] = df["position"].map(parse_positions)
     df["player_key"] = df["player_name"].map(normalize_name)
-    df["game_time_local"] = df["game_info"].apply(parse_game_time)
+    parsed_game = df["game_info"].apply(parse_game_time)
+    df["game_id"] = parsed_game.apply(lambda x: x[0] if x else None)
+    df["game_time_local"] = parsed_game.apply(lambda x: x[1] if x else None)
 
     df = df[df["positions"].map(bool)]
 
@@ -457,6 +459,52 @@ def load_projections(
     return etr_proj, rg_proj, slate_games
 
 
+def load_results_csv(slate: ResultsFileMeta) -> pd.DataFrame:
+    """
+    Load post-slate results. Expected columns: id_col, actual_fpts.
+    """
+    results_path = (
+        RESULTS_DIR
+        / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.datetime}.csv"
+    )
+
+    raw = pd.read_csv(results_path, dtype=str)
+
+    entries = []
+    players = []
+
+    for _, row in raw.iterrows():
+        rank = row["Rank"]
+
+        if pd.notna(rank) and rank.isdigit():
+            entries.append(
+                {
+                    "Rank": int(row["Rank"]),
+                    "EntryId": row["EntryId"],
+                    "EntryName": row["EntryName"],
+                    "TimeRemaining": row["TimeRemaining"],
+                    "Points": float(row["Points"]),
+                    "Lineup": row["Lineup"],
+                }
+            )
+
+        if pd.notna(row["Player"]):
+            players.append(
+                {
+                    "player_key": normalize_name(row["Player"]),
+                    "Player": row["Player"],
+                    "RosterPosition": row["Roster Position"],
+                    "DraftedPct": row["%Drafted"],
+                    "FPTS": float(row["FPTS"]),
+                }
+            )
+
+    entries_df = pd.DataFrame(entries)
+    players_df = pd.DataFrame(players)
+
+    return entries_df, players_df
+
+
 def normalize_columns(
     df: pd.DataFrame, required: Iterable[str] | None = None
 ) -> pd.DataFrame:
@@ -519,24 +567,27 @@ ET = ZoneInfo("America/New_York")
 MT = ZoneInfo("America/Denver")
 
 
-def parse_game_time(game_info: str) -> datetime:
+def parse_game_time(game_info: str):
     """
-    Extracts a timezone-aware Eastern Time datetime from DK Game Info.
-    Example: 'LAL@SAC 01/12/2026 10:00PM ET'
+    Extract game_id and timezone-aware Eastern Time datetime from DK Game Info.
+    Example: 'LAL@SAC 01/12/2026 10:00PM ET' -> ('LAL@SAC', datetime(..., tzinfo=ET))
+    Returns None if parsing fails.
     """
-
-    # Extract the MM/DD/YYYY and HH:MM(AM/PM)
+    if not isinstance(game_info, str):
+        return None
+    parts = game_info.split()
+    if len(parts) < 2:
+        return None
+    game_id = parts[0]
     m = re.search(r"(\d{2}/\d{2}/\d{4})\s+(\d{1,2}:\d{2}[AP]M)", game_info)
     if not m:
         return None
 
     date_str, time_str = m.group(1), m.group(2)
     combined = f"{date_str} {time_str}"
-
     dt_naive = datetime.strptime(combined, "%m/%d/%Y %I:%M%p")
     dt_et = dt_naive.replace(tzinfo=ET)
-
-    return dt_et.astimezone(MT)
+    return game_id, dt_et.astimezone(MT)
 
 
 def parse_positions(raw: str) -> Set[str]:

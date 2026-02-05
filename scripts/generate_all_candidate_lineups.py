@@ -7,6 +7,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from generate_lineup import (
+    generate_lineups,
+)
 from utils import (
     BLEND_CANDIDATE_DIR,
     ETR_CANDIDATE_DIR,
@@ -21,10 +24,6 @@ from utils import (
     lineup_df_to_player_keys,
     load_dk_salaries_csv,
     parse_filename,
-)
-
-from scripts.generate_lineup import (
-    generate_lineups,
 )
 
 

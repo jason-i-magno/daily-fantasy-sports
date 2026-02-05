@@ -38,6 +38,7 @@ from utils import (
     blend_projections,
     load_dk_salaries_csv,
     load_projections,
+    load_results_csv,
     normalize_name,
     parse_filename,
     total_fragile_minutes,
@@ -366,52 +367,6 @@ def load_candidates(
     ) = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries, use_late_swaps)
 
     return lineups
-
-
-def load_results_csv(slate: ResultsFileMeta) -> pd.DataFrame:
-    """
-    Load post-slate results. Expected columns: id_col, actual_fpts.
-    """
-    results_path = (
-        RESULTS_DIR
-        / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.datetime}.csv"
-    )
-
-    raw = pd.read_csv(results_path, dtype=str)
-
-    entries = []
-    players = []
-
-    for _, row in raw.iterrows():
-        rank = row["Rank"]
-
-        if pd.notna(rank) and rank.isdigit():
-            entries.append(
-                {
-                    "Rank": int(row["Rank"]),
-                    "EntryId": row["EntryId"],
-                    "EntryName": row["EntryName"],
-                    "TimeRemaining": row["TimeRemaining"],
-                    "Points": float(row["Points"]),
-                    "Lineup": row["Lineup"],
-                }
-            )
-
-        if pd.notna(row["Player"]):
-            players.append(
-                {
-                    "player_key": normalize_name(row["Player"]),
-                    "Player": row["Player"],
-                    "RosterPosition": row["Roster Position"],
-                    "DraftedPct": row["%Drafted"],
-                    "FPTS": float(row["FPTS"]),
-                }
-            )
-
-    entries_df = pd.DataFrame(entries)
-    players_df = pd.DataFrame(players)
-
-    return entries_df, players_df
 
 
 def lineup_from_player_keys(

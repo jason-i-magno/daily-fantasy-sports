@@ -382,7 +382,7 @@ def generate_lineups(
     working_df = working_df.reset_index(drop=True)
     locked_keys = set(locked_players.keys())
 
-    if locked_players:
+    if game_time_filter:
         working_df = working_df[
             (working_df["player_key"].isin(locked_keys))
             | (working_df["game_time_local"] > game_time_filter)
@@ -458,16 +458,15 @@ def main(argv: Iterable[str]) -> int:
 
     locked_players = {}
     # locked_players = {
-    #     "derrickwhite": "PG",
-    #     "donovanmitchell": "SG",
-    #     "jakelaravia": "SF",
-    #     # "bobbyportis": "PF",
-    #     "jocklandale": "C",
-    #     "dennisschroder": "G",
-    #     # "jordangoodwin": "F",
-    #     "paytonpritchard": "UTIL",
+    #     "brandinpodziemski": "PG",
+    #     "vjedgecombe": "SG",
+    #     # "johnnyfurphy": "SF",
+    #     "dominickbarlow": "PF",
+    #     "andredrummond": "C",
+    #     "deanthonymelton": "G",
+    #     # "kylefilipowski": "F",
+    #     "tyresemaxey": "UTIL",
     # }
-
     game_time_filter = datetime.now(MT)
 
     if "T" in args.slate_id:
