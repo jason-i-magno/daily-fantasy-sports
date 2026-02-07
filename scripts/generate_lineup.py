@@ -19,8 +19,13 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pulp
-from utils import (
+from sqlalchemy import select
+
+from db.models import Contest, Player, Projection, Salary, Source
+from db.session import SessionLocal
+from scripts.utils import (
     CANDIDATE_LINEUPS_DIR,
+    ET,
     MT,
     SLOT_ORDER,
     SLOTS,
@@ -30,6 +35,7 @@ from utils import (
     lineup_df_to_player_keys,
     load_dk_salaries_csv,
     load_projections,
+    parse_positions,
     parse_slate_id,
     total_fragile_minutes,
 )
@@ -49,6 +55,120 @@ def build_player_index_map(
     df: pd.DataFrame, id_col: str = "player_name"
 ) -> dict[str, int]:
     return {name: idx for idx, name in enumerate(df[id_col])}
+
+
+def load_from_db(meta, projection_source: str):
+    """Load DK salaries and projections from the database for the given slate."""
+    session = SessionLocal()
+    contest_date = datetime.fromisoformat(meta.datetime.split("T")[0])
+    contest = (
+        session.execute(
+            select(Contest).where(
+                Contest.date == contest_date, Contest.slate_type == meta.slate
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if not contest:
+        raise ValueError(
+            f"No contest found in DB for {meta.slate} on {contest_date.date()}"
+        )
+
+    # Salaries
+    sal_rows = session.execute(
+        select(Salary, Player)
+        .join(Player, Salary.player_id == Player.id)
+        .where(Salary.contest_id == contest.id)
+    ).all()
+
+    salary_records = []
+    for row in sal_rows:
+        salary = row[0]
+        player = row[1]
+        salary_records.append(
+            {
+                "player_name": player.key,
+                "player_key": player.key,
+                "salary": salary.salary,
+                "position": salary.position,
+                "positions": parse_positions(salary.position),
+                "team": salary.team,
+                "game_info": salary.game or "",
+                "game_id": salary.game or "",
+                "game_time_local": pd.NaT,
+            }
+        )
+    dk_df = pd.DataFrame(salary_records)
+
+    def projection_df(source_name: str) -> pd.DataFrame:
+        source = session.execute(
+            select(Source).where(Source.name == source_name)
+        ).scalar_one_or_none()
+        if not source:
+            return pd.DataFrame()
+        rows = session.execute(
+            select(Projection, Player)
+            .join(Player, Projection.player_id == Player.id)
+            .where(
+                Projection.contest_id == contest.id,
+                Projection.source_id == source.id,
+            )
+            .order_by(Projection.snapshot_time.desc())
+        ).all()
+        if not rows:
+            return pd.DataFrame()
+        latest_time = rows[0][0].snapshot_time
+        rows = [r for r in rows if r[0].snapshot_time == latest_time]
+        recs = []
+        for proj, player in rows:
+            recs.append(
+                {
+                    "player_name": player.key,
+                    "player_key": player.key,
+                    "proj_minutes": proj.proj_minutes,
+                    "proj_fpts": proj.proj_fpts,
+                    "game_time_local": proj.snapshot_time.replace(tzinfo=ET).astimezone(
+                        MT
+                    ),
+                }
+            )
+        return pd.DataFrame(recs)
+
+    rg_df = projection_df("rg")
+    etr_df = projection_df("etr")
+
+    def attach_meta(proj_df: pd.DataFrame) -> pd.DataFrame:
+        if proj_df.empty:
+            return proj_df
+        lookup = dk_df.set_index("player_key")
+        proj_df = proj_df.copy()
+        proj_df["salary"] = proj_df["player_key"].map(lookup["salary"])
+        proj_df["positions"] = proj_df["player_key"].map(lookup["positions"])
+        proj_df["team"] = proj_df["player_key"].map(lookup["team"])
+        if "ceiling" not in proj_df:
+            proj_df["ceiling"] = 0.0
+        if "floor" not in proj_df:
+            proj_df["floor"] = 0.0
+        return proj_df
+
+    rg_df = attach_meta(rg_df)
+    etr_df = attach_meta(etr_df)
+
+    session.close()
+
+    blend_df = pd.DataFrame()
+    if not rg_df.empty and not etr_df.empty:
+        # To blend, add salary/positions from DK set
+        lookup = dk_df.set_index("player_key")
+        for df in (rg_df, etr_df):
+            df["salary"] = df["player_key"].map(lookup["salary"])
+            df["position"] = df["player_key"].map(lookup["positions"])
+            df["positions"] = df["player_key"].map(lookup["positions"])
+            df["team"] = df["player_key"].map(lookup["team"])
+        blend_df = blend_projections(rg_df, etr_df)
+
+    return dk_df, rg_df, etr_df, blend_df
 
 
 def patch_lineup_file(path: Path, top_adjusted_player_keys: List[List[int]]) -> None:
@@ -328,6 +448,17 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         action="store_true",
         help="Flag to patch candidate lineups.",
     )
+    parser.add_argument(
+        "--use-db",
+        action="store_true",
+        help="Load salaries/projections from the database instead of CSVs.",
+    )
+    parser.add_argument(
+        "-f",
+        "--filter-game_time",
+        action="store_true",
+        help="Load salaries/projections from the database instead of CSVs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -339,13 +470,18 @@ def generate_lineups(
     patch_candidate_lineups: bool = False,
     locked_players: dict = {},
     game_time_filter: datetime = datetime.now(ZoneInfo("America/Denver")),
+    use_db: bool = False,
 ):
     meta = parse_slate_id(slate_id)
-    dk_df = load_dk_salaries_csv(meta)
-    etr_df, rg_df, slate_games = load_projections(
-        meta, dk_df=dk_df, remove_nan=True, locked_players=locked_players
-    )
-    blend_df = blend_projections(rg_df, etr_df)
+    if use_db:
+        dk_df, rg_df, etr_df, blend_df = load_from_db(meta, projection_source)
+        slate_games = len(set(dk_df["team"])) // 2 if not dk_df.empty else 0
+    else:
+        dk_df = load_dk_salaries_csv(meta)
+        etr_df, rg_df, slate_games = load_projections(
+            meta, dk_df=dk_df, remove_nan=True, locked_players=locked_players
+        )
+        blend_df = blend_projections(rg_df, etr_df)
 
     working_df = None
     if projection_source == "rg":
@@ -368,9 +504,14 @@ def generate_lineups(
     working_df["game_info"] = working_df["player_key"].map(lookup["game_info"])
 
     # Merge in local game time column
-    working_df["game_time_local"] = working_df["player_key"].map(
-        lookup["game_time_local"]
-    )
+    if not use_db:
+        working_df["game_time_local"] = working_df["player_key"].map(
+            lookup["game_time_local"]
+        )
+    elif projection_source == "blend":
+        working_df["game_time_local"] = working_df["player_key"].map(
+            rg_df.set_index("player_key")["game_time_local"]
+        )
 
     working_df = add_game_id_columns(working_df)
 
@@ -458,16 +599,16 @@ def main(argv: Iterable[str]) -> int:
 
     locked_players = {}
     # locked_players = {
-    #     "brandinpodziemski": "PG",
-    #     "vjedgecombe": "SG",
-    #     # "johnnyfurphy": "SF",
-    #     "dominickbarlow": "PF",
-    #     "andredrummond": "C",
-    #     "deanthonymelton": "G",
-    #     # "kylefilipowski": "F",
-    #     "tyresemaxey": "UTIL",
+    #     "cadecunningham": "PG",
+    #     "jordanclarkson": "SG",
+    #     # "aaronwiggins": "SF",
+    #     # "kylefilipowski": "PF",
+    #     "mitchellrobinson": "C",
+    #     # "yukikawamura": "G",
+    #     "ausarthompson": "F",
+    #     "arielhukporti": "UTIL",
     # }
-    game_time_filter = datetime.now(MT)
+    game_time_filter = datetime.now(MT) if args.filter_game_time else None
 
     if "T" in args.slate_id:
         game_time_filter = datetime.fromisoformat(
@@ -482,6 +623,7 @@ def main(argv: Iterable[str]) -> int:
         patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
     )[0]
 
     top_fpts_lineup = generate_lineups(
@@ -492,6 +634,7 @@ def main(argv: Iterable[str]) -> int:
         patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
     )[0]
 
     adjusted_lineups = generate_lineups(
@@ -502,6 +645,7 @@ def main(argv: Iterable[str]) -> int:
         patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
     )
 
     with open(args.output, "w") as out_file:

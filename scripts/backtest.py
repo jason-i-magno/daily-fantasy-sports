@@ -18,6 +18,7 @@ import json
 import logging
 import math
 from datetime import datetime
+from pathlib import Path
 from typing import List, Set, Tuple
 
 import pandas as pd
@@ -48,16 +49,69 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------
+# Constants
+# ----------------------------
+MODELS = [
+    "blend",
+    "etr",
+    "rg",
+]
+
+FILTER_TYPES = [
+    "all",
+    "no_late_swaps",
+    "missing_late_swaps",
+    "late_swaps",
+]
+
+
+STRATEGIES = [
+    "adjusted_fragile_minutes_floor",
+    "adjusted_fragile",
+    "max_fpts",
+]
+
+
+# ----------------------------
 # Data structures
 # ----------------------------
 @dataclasses.dataclass
+class AggregateStrategyMetrics:
+    win_rate = 0.0
+    win_rate_no_mirror: float = 0.0
+    winnings: float = 0.0
+    winnings_no_mirror: float = 0.0
+    n_slates: int = 0
+    n_slates_no_mirror: int = 0
+
+
+@dataclasses.dataclass
+class AggregateFilterMetrics:
+    all: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    no_late_swaps: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    missing_late_swaps: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    late_swaps: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+
+
+@dataclasses.dataclass
 class AggregateLineupMetrics:
-    adjusted_fragile_minutes_floor_win_rate: float = 0.0
-    adjusted_fragile_minutes_floor_winnings: float = 0.0
-    adjusted_fragile_win_rate: float = 0.0
-    adjusted_fragile_winnings: float = 0.0
-    max_fpts_win_rate: float = 0.0
-    max_fpts_winnings: float = 0.0
+    adjusted_fragile_minutes_floor: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    adjusted_fragile: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
 
 
 @dataclasses.dataclass
@@ -65,42 +119,12 @@ class AllSlatesEvaluation:
     blend: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
-    blend_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    blend_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    blend_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
     etr: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    etr_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    etr_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    etr_late_swaps: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
     rg: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
-    rg_no_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    rg_missing_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    rg_late_swaps: AggregateLineupMetrics = dataclasses.field(
-        default_factory=AggregateLineupMetrics
-    )
-    num_slates: int = 0
-    n_late_swap_slates: int = 0
-    n_missing_late_swap_proj: int = 0
 
 
 @dataclasses.dataclass
@@ -141,13 +165,20 @@ class H2HResults:
 
 
 @dataclasses.dataclass
+class StrategyResult:
+    win_rate: float = 0.0
+    win_rate_no_mirror: float | None = None
+    winnings: float = 0.0
+    winnings_no_mirror: float = 0.0
+
+
+@dataclasses.dataclass
 class LineupResult:
-    adjusted_fragile_minutes_floor_win_rate: float = 0.0
-    adjusted_fragile_minutes_floor_winnings: float = 0.0
-    adjusted_fragile_win_rate: float = 0.0
-    adjusted_fragile_winnings: float = 0.0
-    max_fpts_win_rate: float = 0.0
-    max_fpts_winnings: float = 0.0
+    adjusted_fragile_minutes_floor: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    adjusted_fragile: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_fpts: StrategyResult = dataclasses.field(default_factory=StrategyResult)
 
 
 @dataclasses.dataclass
@@ -168,6 +199,7 @@ class SlateResult:
     rg: LineupResult = dataclasses.field(default_factory=LineupResult)
     has_late_swaps: bool = True
     missing_late_swap_proj: bool = False
+    slate_games: int = 0
 
 
 @dataclasses.dataclass
@@ -408,60 +440,89 @@ def lineup_from_player_keys(
     )
 
 
-def print_evaluation(eval: AllSlatesEvaluation):
-    models = ["blend", "etr", "rg"]
-    win_rate_fields = [
-        "adjusted_fragile_minutes_floor_win_rate",
-        "adjusted_fragile_win_rate",
-        "max_fpts_win_rate",
+def print_evaluation(eval_by_bucket: dict[str, AllSlatesEvaluation]):
+    for bucket, eval in sorted(eval_by_bucket.items()):
+        print("\n==============================")
+        print(f"Slate bucket: {bucket}")
+        print("==============================")
+
+        for model in MODELS:
+            model_metrics = getattr(eval, model)
+            print(f"=== {model.upper()} ===")
+            for strategy in STRATEGIES:
+                strategy_metrics = getattr(model_metrics, strategy)
+                for filter_type in FILTER_TYPES:
+                    filter_metrics = getattr(strategy_metrics, filter_type)
+                    for allow_mirrors in [False, True]:
+                        print(
+                            f"\n==={model.upper()} {strategy.upper()} {filter_type.upper()}{'' if allow_mirrors else ' NO MIRROR'}==="
+                        )
+                        wins = (
+                            filter_metrics.win_rate * filter_metrics.n_slates
+                            if allow_mirrors
+                            else filter_metrics.win_rate_no_mirror
+                            * filter_metrics.n_slates_no_mirror
+                        )
+                        n_slates = (
+                            filter_metrics.n_slates
+                            if allow_mirrors
+                            else filter_metrics.n_slates_no_mirror
+                        )
+                        summarize_win_rate(wins, n_slates)
+                        print(f"Winnings: ${filter_metrics.winnings:.2f}")
+
+
+def evaluation_to_df(eval_by_bucket: dict[str, AllSlatesEvaluation]) -> pd.DataFrame:
+    """Flatten bucketed evaluation into a dataframe for writing to disk."""
+    rows = []
+    models = [
+        "blend",
+        "etr",
+        "rg",
+        "blend_no_late_swaps",
+        "etr_no_late_swaps",
+        "rg_no_late_swaps",
+        "blend_missing_late_swaps",
+        "etr_missing_late_swaps",
+        "rg_missing_late_swaps",
+        "blend_late_swaps",
+        "etr_late_swaps",
+        "rg_late_swaps",
     ]
 
-    winnings_fields = [
-        "adjusted_fragile_minutes_floor_winnings",
-        "adjusted_fragile_winnings",
-        "max_fpts_winnings",
-    ]
-
-    print(f"\nEvaluated {eval.num_slates} slates")
-    print(f"Slates with late swaps: {eval.n_late_swap_slates}")
-    print(f"Slates missing late swap projections: {eval.n_missing_late_swap_proj}\n")
-
-    for model in models:
-        metrics = getattr(eval, model)
-        print(f"=== {model.upper()} ===")
-        for field_name in winnings_fields:
-            print(f"  {field_name}: ${getattr(metrics, field_name):.2f}")
-
-        for field_name in win_rate_fields:
-            print(f"  {field_name}: {getattr(metrics, field_name) * 100:.2f}%")
-        print()
-
-    print("===RG Max FPTs===")
-    summarize_win_rate(eval.rg.max_fpts_win_rate * eval.num_slates, eval.num_slates)
-    print(f"Winnings: ${eval.rg.max_fpts_winnings:.2f}")
-
-    print("\n===RG Max FPTs No Late Swaps===")
-    summarize_win_rate(
-        eval.rg_no_late_swaps.max_fpts_win_rate
-        * (eval.num_slates - eval.n_late_swap_slates),
-        eval.num_slates - eval.n_late_swap_slates,
-    )
-    print(f"Winnings: ${eval.rg_no_late_swaps.max_fpts_winnings:.2f}")
-
-    print("\n===RG Max FPTs Late Swaps But Missing Projections===")
-    summarize_win_rate(
-        eval.rg_missing_late_swaps.max_fpts_win_rate * eval.n_missing_late_swap_proj,
-        eval.n_missing_late_swap_proj,
-    )
-    print(f"Winnings: ${eval.rg_missing_late_swaps.max_fpts_winnings:.2f}")
-
-    print("\n===RG Max FPTs Late Swaps But Have Projections===")
-    summarize_win_rate(
-        eval.rg_late_swaps.max_fpts_win_rate
-        * (eval.n_late_swap_slates - eval.n_missing_late_swap_proj),
-        eval.n_late_swap_slates - eval.n_missing_late_swap_proj,
-    )
-    print(f"Winnings: ${eval.rg_late_swaps.max_fpts_winnings:.2f}")
+    for bucket, agg in eval_by_bucket.items():
+        for model in models:
+            model_metrics = getattr(agg, model, None)
+            if model_metrics is None:
+                continue
+            row = {
+                "bucket": bucket,
+                "model": model,
+                "num_slates": agg.num_slates,
+                "n_late_swap_slates": agg.n_late_swap_slates,
+                "n_missing_late_swap_proj": agg.n_missing_late_swap_proj,
+            }
+            for strategy in STRATEGIES:
+                strategy_metrics = getattr(model_metrics, strategy)
+                for allow_mirrors in [True, False]:
+                    row[strategy] = round(
+                        getattr(
+                            strategy_metrics,
+                            "win_rate" if allow_mirrors else "win_rate_no_mirror",
+                            0.0,
+                        ),
+                        3,
+                    )
+                    row[strategy] = round(
+                        getattr(
+                            strategy_metrics,
+                            "winnings" if allow_mirrors else "winnings_no_mirror",
+                            0.0,
+                        ),
+                        2,
+                    )
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def summarize_win_rate(
@@ -759,13 +820,11 @@ def evaluate_proj_lineups(
     # Adjusted Fragile
     adjusted_fragile_lineup = sorted(
         top_fpts_lineups,
-        key=lambda lu: (
-            adjusted_score(
-                lu.projected_fpts,
-                lu.projected_minutes,
-                lu.total_fragile_minutes,
-                slate_games,
-            )
+        key=lambda lu: adjusted_score(
+            lu.projected_fpts,
+            lu.projected_minutes,
+            lu.total_fragile_minutes,
+            slate_games,
         ),
         reverse=True,
     )[0]
@@ -822,8 +881,11 @@ def evaluate_h2h_lineups(
     opponent_results = []
     lineup_result = LineupResult()
     adjusted_fragile_minutes_floor_wins = 0
+    adjusted_fragile_minutes_floor_wins_no_mirror = 0
     adjusted_fragile_wins = 0
+    adjusted_fragile_wins_no_mirror = 0
     max_fpts_wins = 0
+    max_fpts_wins_no_mirror = 0
 
     if proj_source.lower() == "blend":
         top_fpts_lineups = top_lineups.blend_fpts
@@ -844,26 +906,27 @@ def evaluate_h2h_lineups(
     adjusted_fragile_minutes_floor_lineup = top_fpts_lineups_minutes_floor[0]
     adjusted_fragile_lineup = sorted(
         top_fpts_lineups,
-        key=lambda lu: (
-            adjusted_score(
-                lu.projected_fpts,
-                lu.projected_minutes,
-                lu.total_fragile_minutes,
-                slate_games,
-            )
+        key=lambda lu: adjusted_score(
+            lu.projected_fpts,
+            lu.projected_minutes,
+            lu.total_fragile_minutes,
+            slate_games,
         ),
         reverse=True,
     )[0]
 
-    for strategy in ["max_fpts", "adj_frag", "adj_frag_minutes_floor"]:
+    for strategy in STRATEGIES:
         lineup = None
+        no_mirror_count = 0
 
         if strategy == "max_fpts":
             lineup = baseline_proj
-        elif strategy == "adj_frag":
+        elif strategy == "adjusted_fragile":
             lineup = adjusted_fragile_lineup
-        elif strategy == "adj_frag_minutes_floor":
+        elif strategy == "adjusted_fragile_minutes_floor":
             lineup = adjusted_fragile_minutes_floor_lineup
+        else:
+            raise ValueError("Invalid strategy")
 
         for fee in range(1, 4):
             contest_result, opponent_result = evaluate_contest(
@@ -897,19 +960,50 @@ def evaluate_h2h_lineups(
 
             if strategy == "max_fpts":
                 max_fpts_wins += win
-                lineup_result.max_fpts_winnings += winnings
-            elif strategy == "adj_frag":
-                adjusted_fragile_wins += win
-                lineup_result.adjusted_fragile_winnings += winnings
-            elif strategy == "adj_frag_minutes_floor":
-                adjusted_fragile_minutes_floor_wins += win
-                lineup_result.adjusted_fragile_minutes_floor_winnings += winnings
+                lineup_result.max_fpts.winnings += winnings
 
-    lineup_result.adjusted_fragile_minutes_floor_win_rate = (
+                if not contest_result.is_mirror:
+                    lineup_result.max_fpts.winnings_no_mirror += winnings
+                    max_fpts_wins_no_mirror += win
+                    no_mirror_count += 1
+            elif strategy == "adjusted_fragile":
+                adjusted_fragile_wins += win
+                lineup_result.adjusted_fragile.winnings += winnings
+
+                if not contest_result.is_mirror:
+                    lineup_result.adjusted_fragile.winnings_no_mirror += winnings
+                    adjusted_fragile_wins_no_mirror += win
+                    no_mirror_count += 1
+            elif strategy == "adjusted_fragile_minutes_floor":
+                adjusted_fragile_minutes_floor_wins += win
+                lineup_result.adjusted_fragile_minutes_floor.winnings += winnings
+
+                if not contest_result.is_mirror:
+                    lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror += (
+                        winnings
+                    )
+                    adjusted_fragile_minutes_floor_wins_no_mirror += win
+                    no_mirror_count += 1
+
+        if no_mirror_count > 0:
+            if strategy == "max_fpts":
+                lineup_result.max_fpts.win_rate_no_mirror = (
+                    max_fpts_wins_no_mirror / no_mirror_count
+                )
+            elif strategy == "adjusted_fragile":
+                lineup_result.adjusted_fragile.win_rate_no_mirror = (
+                    adjusted_fragile_wins_no_mirror / no_mirror_count
+                )
+            elif strategy == "adjusted_fragile_minutes_floor":
+                lineup_result.adjusted_fragile_minutes_floor.win_rate_no_mirror = (
+                    adjusted_fragile_minutes_floor_wins_no_mirror / no_mirror_count
+                )
+
+    lineup_result.adjusted_fragile_minutes_floor.win_rate = (
         adjusted_fragile_minutes_floor_wins / 3
     )
-    lineup_result.adjusted_fragile_win_rate = adjusted_fragile_wins / 3
-    lineup_result.max_fpts_win_rate = max_fpts_wins / 3
+    lineup_result.adjusted_fragile.win_rate = adjusted_fragile_wins / 3
+    lineup_result.max_fpts.win_rate = max_fpts_wins / 3
 
     return (
         contest_results,
@@ -1053,124 +1147,105 @@ def aggregate_results(results: List[ContestResult], opponent_results) -> pd.Data
     return agg, opponents
 
 
-def aggregate_slate_results(results: list[SlateResult]) -> AllSlatesEvaluation:
-    agg = AllSlatesEvaluation()
-    win_rate_fields = [
-        "adjusted_fragile_minutes_floor_win_rate",
-        "adjusted_fragile_win_rate",
-        "max_fpts_win_rate",
-    ]
-    winnings_fields = [
-        "adjusted_fragile_minutes_floor_winnings",
-        "adjusted_fragile_winnings",
-        "max_fpts_winnings",
-    ]
+from collections import defaultdict
 
-    for _, slate in enumerate(results, start=1):
-        for model_name in ("blend", "etr", "rg"):
-            update_aggregate_linuep_metrics(
-                model_name, slate, agg, win_rate_fields, winnings_fields
-            )
 
-        if slate.has_late_swaps:
-            agg.n_late_swap_slates += 1
+def slate_bucket(games: int) -> str:
+    # if games <= 4:
+    #     return "2-4"
+    # if games <= 8:
+    #     return "5-8"
+    # return "9+"
 
-            if slate.missing_late_swap_proj:
-                agg.n_missing_late_swap_proj += 1
+    return str(games)
 
-                for model_name in (
-                    "blend_missing_late_swaps",
-                    "etr_missing_late_swaps",
-                    "rg_missing_late_swaps",
-                ):
-                    update_aggregate_linuep_metrics(
-                        model_name, slate, agg, win_rate_fields, winnings_fields
+
+def aggregate_slate_results(
+    results: list[SlateResult],
+) -> dict[str, AllSlatesEvaluation]:
+    bucketed: dict[str, AllSlatesEvaluation] = defaultdict(AllSlatesEvaluation)
+    overall = AllSlatesEvaluation()
+
+    def finalize(target: AllSlatesEvaluation):
+        for model in MODELS:
+            model_dest = getattr(target, model)
+            for strategy in STRATEGIES:
+                strategy_dest = getattr(model_dest, strategy)
+                for filter_type in FILTER_TYPES:
+                    filter_dest = getattr(strategy_dest, filter_type)
+                    denom = getattr(filter_dest, "n_slates") or 1
+                    setattr(
+                        filter_dest,
+                        "win_rate",
+                        getattr(filter_dest, "win_rate") / denom,
                     )
-            else:
-                for model_name in (
-                    "blend_late_swaps",
-                    "etr_late_swaps",
-                    "rg_late_swaps",
-                ):
-                    update_aggregate_linuep_metrics(
-                        model_name, slate, agg, win_rate_fields, winnings_fields
+
+                    denom_no_mirror = getattr(filter_dest, "n_slates_no_mirror") or 1
+                    setattr(
+                        filter_dest,
+                        "win_rate_no_mirror",
+                        getattr(filter_dest, "win_rate_no_mirror") / denom_no_mirror,
                     )
-        else:
-            for model_name in (
-                "blend_no_late_swaps",
-                "etr_no_late_swaps",
-                "rg_no_late_swaps",
+
+    for slate in results:
+        bucket = slate_bucket(slate.slate_games)
+        agg = bucketed[bucket]
+        agg_all = overall
+
+        for model in MODELS:
+            update_aggregate_linuep_metrics(model, slate, agg)
+            update_aggregate_linuep_metrics(model, slate, agg_all)
+
+    # for agg in bucketed.values():
+    #     finalize(agg)
+
+    finalize(overall)
+
+    # result = dict(bucketed)
+    result = {}
+    result["overall"] = overall
+    return result
+
+
+def update_aggregate_linuep_metrics(model_name, slate, agg):
+    model_src = getattr(slate, model_name.split("_")[0])  # LineupResult
+    model_dest = getattr(agg, model_name)  # AggregateLineupMetrics
+
+    # Update win-rate and winnings
+    for strategy in STRATEGIES:
+        strategy_dest = getattr(model_dest, strategy)
+        strategy_src = getattr(model_src, strategy)
+        for filter_type in FILTER_TYPES:
+            filter_dest = getattr(strategy_dest, filter_type)
+
+            if filter_type == "no_late_swaps" and slate.has_late_swaps:
+                continue
+
+            if filter_type == "missing_late_swaps" and not (
+                slate.has_late_swaps and slate.missing_late_swap_proj
             ):
-                update_aggregate_linuep_metrics(
-                    model_name, slate, agg, win_rate_fields, winnings_fields
-                )
+                continue
 
-    agg.num_slates = len(results)
+            if filter_type == "late_swaps" and not (
+                slate.has_late_swaps and not slate.missing_late_swap_proj
+            ):
+                continue
 
-    for model_name in ("blend", "etr", "rg"):
-        dest = getattr(agg, model_name)  # AggregateLineupMetrics
+            for allow_mirrors in [True, False]:
+                filter_win_rate = "win_rate" if allow_mirrors else "win_rate_no_mirror"
+                old_win_rate = getattr(filter_dest, filter_win_rate)
+                val_win_rate = getattr(strategy_src, filter_win_rate)
 
-        # Update win-rate
-        for f in win_rate_fields:
-            old = getattr(dest, f)
+                if val_win_rate is not None:
+                    setattr(filter_dest, filter_win_rate, old_win_rate + val_win_rate)
+                    n_slates = "n_slates" if allow_mirrors else "n_slates_no_mirror"
+                    old_n_slates = getattr(filter_dest, n_slates)
+                    setattr(filter_dest, n_slates, old_n_slates + 1)
 
-            setattr(dest, f, old / agg.num_slates)
-
-    for model_name in ("blend_no_late_swaps", "etr_no_late_swaps", "rg_no_late_swaps"):
-        dest = getattr(agg, model_name)  # AggregateLineupMetrics
-
-        # Update win-rate
-        for f in win_rate_fields:
-            old = getattr(dest, f)
-
-            setattr(dest, f, old / (agg.num_slates - agg.n_late_swap_slates))
-
-    for model_name in (
-        "blend_missing_late_swaps",
-        "etr_missing_late_swaps",
-        "rg_missing_late_swaps",
-    ):
-        dest = getattr(agg, model_name)  # AggregateLineupMetrics
-
-        # Update win-rate
-        for f in win_rate_fields:
-            old = getattr(dest, f)
-
-            setattr(dest, f, old / agg.n_missing_late_swap_proj)
-
-    for model_name in (
-        "blend_late_swaps",
-        "etr_late_swaps",
-        "rg_late_swaps",
-    ):
-        dest = getattr(agg, model_name)  # AggregateLineupMetrics
-
-        # Update win-rate
-        for f in win_rate_fields:
-            old = getattr(dest, f)
-
-            setattr(
-                dest, f, old / (agg.n_late_swap_slates - agg.n_missing_late_swap_proj)
-            )
-    return agg
-
-
-def update_aggregate_linuep_metrics(
-    model_name, slate, agg, win_rate_fields, winnings_fields
-):
-    src = getattr(slate, model_name.split("_")[0])  # LineupResult
-    dest = getattr(agg, model_name)  # AggregateLineupMetrics
-
-    # Update win-rate
-    for f in win_rate_fields:
-        old = getattr(dest, f)
-        val = getattr(src, f)
-
-        setattr(dest, f, old + val)
-
-    # Update winnings
-    for f in winnings_fields:
-        setattr(dest, f, getattr(dest, f) + getattr(src, f))
+                filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
+                old_winnings = getattr(filter_dest, filter_winnings)
+                val_winnings = getattr(strategy_src, filter_winnings)
+                setattr(filter_dest, filter_winnings, old_winnings + val_winnings)
 
 
 def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
@@ -1190,10 +1265,10 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
     game_times = sorted(dk_salaries.set_index("player_key")["game_time_local"].unique())
 
-    n_games = len(game_times)
+    n_game_times = len(game_times)
     slate_result = SlateResult()
 
-    if n_games == 1:
+    if n_game_times == 1:
         slate_result.has_late_swaps = False
         logging.info("No late swaps")
 
@@ -1222,6 +1297,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
             break
 
     etr_proj, rg_proj, slate_games = load_projections(meta, remove_nan=False)
+    slate_result.slate_games = slate_games
     blend_proj = blend_projections(rg_proj, etr_proj)
 
     _, results_players_df = load_results_csv(slate)
@@ -1333,6 +1409,10 @@ if __name__ == "__main__":
 
     aggregate = aggregate_slate_results(slate_results)
     print_evaluation(aggregate)
+    # eval_df = evaluation_to_df(aggregate)
+    out_path = Path("data/processed/backtest_eval.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # eval_df.to_csv(out_path, index=False)
 
     summary_df, opponents_df = aggregate_results(contest_results, opponent_results)
     summary_df.to_csv("data/processed/backtest.csv")

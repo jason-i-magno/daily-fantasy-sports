@@ -7,11 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from generate_lineup import (
+from scripts.generate_lineup import (
     generate_lineups,
 )
-from utils import (
+from scripts.utils import (
     BLEND_CANDIDATE_DIR,
+    CANDIDATE_LINEUPS_DIR,
     ETR_CANDIDATE_DIR,
     ETR_PROJ_DIR,
     MT,
@@ -252,6 +253,7 @@ def main(argv: Iterable[str]) -> int:
                         patch_candidate_lineups=args.patch_candidate_lineups,
                         locked_players=fpts_locked_players,
                         game_time_filter=game_time_filter,
+                        use_db=False,
                     )
 
                     max_minutes_lineups = generate_lineups(
@@ -262,6 +264,7 @@ def main(argv: Iterable[str]) -> int:
                         patch_candidate_lineups=args.patch_candidate_lineups,
                         locked_players=minutes_locked_players,
                         game_time_filter=game_time_filter,
+                        use_db=False,
                     )
 
                     max_fpts_minutes_floor_lineups = generate_lineups(
@@ -272,6 +275,7 @@ def main(argv: Iterable[str]) -> int:
                         patch_candidate_lineups=args.patch_candidate_lineups,
                         locked_players=adjusted_locked_players,
                         game_time_filter=game_time_filter,
+                        use_db=False,
                     )
 
                     end_time = time.perf_counter()
@@ -312,7 +316,7 @@ def main(argv: Iterable[str]) -> int:
                         candidate_subdir = "blend"
 
                     write_lineups_to_file(
-                        out_dir=f"data/candidate_lineups/{candidate_subdir}",
+                        out_dir=CANDIDATE_LINEUPS_DIR / candidate_subdir,
                         meta=meta,
                         slate_size=len(set(dk_salaries["game_info"])),
                         proj_source=proj_source,
