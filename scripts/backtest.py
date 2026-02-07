@@ -749,126 +749,6 @@ def wilson_interval(
 # ----------------------------
 # Evaluation
 # ----------------------------
-def evaluate_proj_lineups(
-    slate_id: str,
-    slate_games: int,
-    top_lineups: TopLineups,
-    proj_source: str,
-) -> List[ContestResult]:
-    results: List[ContestResult] = []
-    baseline_proj = top_lineups.etr_fpts[0]
-
-    if proj_source.lower() == "blend":
-        top_fpts_lineups = top_lineups.blend_fpts
-        top_minutes_lineups = top_lineups.blend_minutes
-    elif proj_source.lower() == "etr":
-        top_fpts_lineups = top_lineups.etr_fpts
-        top_minutes_lineups = top_lineups.etr_minutes
-    elif proj_source.lower() == "rg":
-        top_fpts_lineups = top_lineups.rg_fpts
-        top_minutes_lineups = top_lineups.rg_minutes
-    else:
-        raise ValueError(f"Invalid projection source {proj_source}")
-
-    top_10_fpts_lineups = top_fpts_lineups[:10]
-    actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
-    top_10_median_actual = actual_scores[len(actual_scores) // 2]
-
-    # Max FPTS
-    max_fpts_lineup = top_fpts_lineups[0]
-
-    contest_result, _ = evaluate_contest(
-        baseline_proj,
-        max_fpts_lineup,
-        top_10_median_actual,
-        slate_id,
-        slate_games,
-        f"{proj_source} Max FPTs",
-    )
-    results.append(contest_result)
-
-    # Max Minutes
-    max_minutes_lineup = top_minutes_lineups[0]
-
-    contest_result, _ = evaluate_contest(
-        baseline_proj,
-        max_minutes_lineup,
-        top_10_median_actual,
-        slate_id,
-        slate_games,
-        f"{proj_source} Max Mins",
-    )
-    results.append(contest_result)
-
-    # Max Minutes within Top FPTs
-    max_minutes_within_top_fpts_lineup = sorted(
-        top_fpts_lineups,
-        key=lambda lu: (lu.projected_minutes, lu.projected_fpts),
-        reverse=True,
-    )[0]
-
-    contest_result, _ = evaluate_contest(
-        baseline_proj,
-        max_minutes_within_top_fpts_lineup,
-        top_10_median_actual,
-        slate_id,
-        slate_games,
-        f"{proj_source} Max Mins in Top FPTs",
-    )
-    results.append(contest_result)
-
-    # Adjusted Fragile
-    adjusted_fragile_lineup = sorted(
-        top_fpts_lineups,
-        key=lambda lu: adjusted_score(
-            lu.projected_fpts,
-            lu.projected_minutes,
-            lu.total_fragile_minutes,
-            slate_games,
-        ),
-        reverse=True,
-    )[0]
-
-    contest_result, _ = evaluate_contest(
-        baseline_proj,
-        adjusted_fragile_lineup,
-        top_10_median_actual,
-        slate_id,
-        slate_games,
-        f"{proj_source} Adj Frag",
-    )
-    results.append(contest_result)
-
-    # Top 10 median vs RG max FPTs
-    win_vs_proj = 0.0
-
-    if top_10_median_actual > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif top_10_median_actual < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
-    else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
-
-    results.append(
-        ContestResult(
-            slate_id=slate_id,
-            slate_games=slate_games,
-            strategy=f"{proj_source} median",
-            my_actual=top_10_median_actual,
-            baseline_proj=baseline_proj.actual_fpts,
-            win=win_vs_proj,
-            margin=top_10_median_actual - baseline_proj.actual_fpts,
-            is_mirror=False,
-            win_median=0.5,
-            margin_median=0.0,
-            winnings=0,
-            opponent="",
-        )
-    )
-
-    return results
-
-
 def evaluate_h2h_lineups(
     slate_id: str,
     slate_games: int,
@@ -877,8 +757,6 @@ def evaluate_h2h_lineups(
     h2h_results: H2HResults,
     proj_source: str,
 ) -> List[ContestResult]:
-    contest_results: List[ContestResult] = []
-    opponent_results = []
     lineup_result = LineupResult()
     adjusted_fragile_minutes_floor_wins = 0
     adjusted_fragile_minutes_floor_wins_no_mirror = 0
@@ -929,7 +807,7 @@ def evaluate_h2h_lineups(
             raise ValueError("Invalid strategy")
 
         for fee in range(1, 4):
-            contest_result, opponent_result = evaluate_contest(
+            contest_result, _ = evaluate_contest(
                 lineup,
                 getattr(h2h_results, f"lineup_{fee}"),
                 top_10_median_actual,
@@ -939,19 +817,6 @@ def evaluate_h2h_lineups(
                 fee=fee,
                 opponent=getattr(h2h_results, f"opponent_{fee}"),
             )
-
-            if strategy == "max_fpts" and (
-                fee == 1
-                or (fee == 2 and h2h_results.opponent_2 != h2h_results.opponent_1)
-                or (
-                    fee == 3
-                    and h2h_results.opponent_3 != h2h_results.opponent_2
-                    and h2h_results.opponent_3 != h2h_results.opponent_1
-                )
-            ):
-                opponent_results.append(opponent_result)
-
-            contest_results.append(contest_result)
 
             win = 1 - contest_result.win
             winnings = calculate_winnings(
@@ -1005,11 +870,7 @@ def evaluate_h2h_lineups(
     lineup_result.adjusted_fragile.win_rate = adjusted_fragile_wins / 3
     lineup_result.max_fpts.win_rate = max_fpts_wins / 3
 
-    return (
-        contest_results,
-        opponent_results,
-        lineup_result,
-    )
+    return lineup_result
 
 
 def evaluate_contest(
@@ -1078,73 +939,6 @@ def evaluate_contest(
     )
 
     return contest_result, opponent_result
-
-
-def aggregate_results(results: List[ContestResult], opponent_results) -> pd.DataFrame:
-    if not results:
-        return pd.DataFrame()
-    df = pd.DataFrame(dataclasses.asdict(r) for r in results)
-
-    def bucket(games: int) -> str:
-        if games <= 4:
-            return "2-4"
-        if games <= 8:
-            return "5-8"
-        return "9+"
-
-    df["slate_bucket"] = df["slate_games"].map(bucket)
-    df["non_mirror"] = 1 - df["is_mirror"]
-    # Only count wins on non-mirrors; NaN for mirrors so they don't affect mean
-    df["win_no_mirror"] = df.apply(
-        lambda r: r["win"] if r["is_mirror"] == 0 else None,
-        axis=1,
-    )
-    agg = (
-        df.groupby(["strategy", "slate_bucket"])
-        .agg(
-            # Overall score vs RG (mirrors count as 0.5)
-            win=("win", "mean"),
-            # Edge win rate: only when you deviated
-            win_no_mirror=("win_no_mirror", "mean"),
-            # How often you mirrored RG
-            mirror_rate=("is_mirror", "mean"),
-            # Margins (still informative overall)
-            margin=("margin", "mean"),
-            # Overall score vs RG (mirrors count as 0.5)
-            win_median=("win_median", "mean"),
-            # Margins (still informative overall)
-            margin_median=("margin_median", "mean"),
-            slates=("slate_id", "nunique"),
-            winnings=("winnings", "sum"),
-        )
-        .round(3)
-        .reset_index()
-    )
-    opponents_df = pd.DataFrame(dataclasses.asdict(r) for r in opponent_results)
-    opponents_df["non_mirror"] = 1 - opponents_df["is_mirror"]
-    # Only count wins on non-mirrors; NaN for mirrors so they don't affect mean
-    opponents_df["win_no_mirror"] = opponents_df.apply(
-        lambda r: r["win"] if r["is_mirror"] == 0 else None,
-        axis=1,
-    )
-    opponents = (
-        opponents_df.groupby(["opponent"])
-        .agg(
-            # Overall score vs RG (mirrors count as 0.5)
-            win=("win", "mean"),
-            # Edge win rate: only when you deviated
-            win_no_mirror=("win_no_mirror", "mean"),
-            # How often you mirrored RG
-            mirror_rate=("is_mirror", "mean"),
-            # Margins (still informative overall)
-            margin=("margin", "mean"),
-            slates=("slate_id", "nunique"),
-        )
-        .round(3)
-        .sort_values(by="win")
-        .reset_index()
-    )
-    return agg, opponents
 
 
 from collections import defaultdict
@@ -1314,25 +1108,10 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         # False,
     )
 
-    contest_results: List[ContestResult] = []
-
-    # Evaluate strategies against projection strategies
-    for proj_source in ["BLEND", "ETR", "RG"]:
-        contest_results += evaluate_proj_lineups(
-            slate_id=slate.slate_id,
-            slate_games=slate_games,
-            top_lineups=top_lineups,
-            proj_source=proj_source,
-        )
-
     # Evaluate strategies against H2H contests
     h2h_results = load_h2h_results(slate, rg_merged)
 
-    (
-        results,
-        _,
-        slate_result.rg,
-    ) = evaluate_h2h_lineups(
+    slate_result.rg = evaluate_h2h_lineups(
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
@@ -1340,13 +1119,8 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         h2h_results=h2h_results,
         proj_source="RG",
     )
-    contest_results += results
 
-    (
-        results,
-        opponent_results,
-        slate_result.etr,
-    ) = evaluate_h2h_lineups(
+    slate_result.etr = evaluate_h2h_lineups(
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
@@ -1354,13 +1128,8 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         h2h_results=h2h_results,
         proj_source="ETR",
     )
-    contest_results += results
 
-    (
-        results,
-        _,
-        slate_result.blend,
-    ) = evaluate_h2h_lineups(
+    slate_result.blend = evaluate_h2h_lineups(
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
@@ -1368,9 +1137,8 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         h2h_results=h2h_results,
         proj_source="BLEND",
     )
-    contest_results += results
 
-    return contest_results, opponent_results, slate_result
+    return slate_result
 
 
 if __name__ == "__main__":
@@ -1393,18 +1161,13 @@ if __name__ == "__main__":
 
     slates.sort(key=lambda x: x.datetime)
 
-    contest_results = []
-    opponent_results = []
-
     slate_results: List[SlateResult] = []
 
     for i, slate in enumerate(slates):
         print(f"[{i + 1}/{n_slates}] {slate.slate_id}")
 
-        results, opp_results, slate_result = evaluate_slate(slate=slate)
+        slate_result = evaluate_slate(slate=slate)
 
-        contest_results += results
-        opponent_results += opp_results
         slate_results.append(slate_result)
 
     aggregate = aggregate_slate_results(slate_results)
@@ -1413,7 +1176,3 @@ if __name__ == "__main__":
     out_path = Path("data/processed/backtest_eval.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # eval_df.to_csv(out_path, index=False)
-
-    summary_df, opponents_df = aggregate_results(contest_results, opponent_results)
-    summary_df.to_csv("data/processed/backtest.csv")
-    opponents_df.to_csv("data/processed/opponents.csv")
