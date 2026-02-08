@@ -77,7 +77,7 @@ STRATEGIES = [
 # ----------------------------
 @dataclasses.dataclass
 class AggregateStrategyMetrics:
-    win_rate = 0.0
+    win_rate: float = 0.0
     win_rate_no_mirror: float = 0.0
     winnings: float = 0.0
     winnings_no_mirror: float = 0.0
@@ -139,7 +139,6 @@ class ContestResult:
     is_mirror: bool
     win_median: float
     margin_median: float
-    winnings: float
     opponent: str
 
 
@@ -169,7 +168,7 @@ class StrategyResult:
     win_rate: float = 0.0
     win_rate_no_mirror: float | None = None
     winnings: float = 0.0
-    winnings_no_mirror: float = 0.0
+    winnings_no_mirror: float | None = None
 
 
 @dataclasses.dataclass
@@ -469,59 +468,90 @@ def print_evaluation(eval_by_bucket: dict[str, AllSlatesEvaluation]):
                             else filter_metrics.n_slates_no_mirror
                         )
                         summarize_win_rate(wins, n_slates)
-                        print(f"Winnings: ${filter_metrics.winnings:.2f}")
+                        print(
+                            f"Winnings: ${filter_metrics.winnings if allow_mirrors else filter_metrics.winnings_no_mirror:.2f}"
+                        )
 
 
 def evaluation_to_df(eval_by_bucket: dict[str, AllSlatesEvaluation]) -> pd.DataFrame:
     """Flatten bucketed evaluation into a dataframe for writing to disk."""
     rows = []
-    models = [
-        "blend",
-        "etr",
-        "rg",
-        "blend_no_late_swaps",
-        "etr_no_late_swaps",
-        "rg_no_late_swaps",
-        "blend_missing_late_swaps",
-        "etr_missing_late_swaps",
-        "rg_missing_late_swaps",
-        "blend_late_swaps",
-        "etr_late_swaps",
-        "rg_late_swaps",
-    ]
 
-    for bucket, agg in eval_by_bucket.items():
-        for model in models:
+    for bucket, agg in sorted(eval_by_bucket.items()):
+        for model in MODELS:
             model_metrics = getattr(agg, model, None)
             if model_metrics is None:
                 continue
-            row = {
-                "bucket": bucket,
-                "model": model,
-                "num_slates": agg.num_slates,
-                "n_late_swap_slates": agg.n_late_swap_slates,
-                "n_missing_late_swap_proj": agg.n_missing_late_swap_proj,
-            }
             for strategy in STRATEGIES:
                 strategy_metrics = getattr(model_metrics, strategy)
-                for allow_mirrors in [True, False]:
-                    row[strategy] = round(
-                        getattr(
-                            strategy_metrics,
-                            "win_rate" if allow_mirrors else "win_rate_no_mirror",
-                            0.0,
-                        ),
-                        3,
-                    )
-                    row[strategy] = round(
-                        getattr(
-                            strategy_metrics,
-                            "winnings" if allow_mirrors else "winnings_no_mirror",
-                            0.0,
-                        ),
-                        2,
-                    )
-            rows.append(row)
+                for filter_type in FILTER_TYPES:
+                    filter_metrics = getattr(strategy_metrics, filter_type)
+                    for allow_mirrors in [True, False]:
+                        n_slates = getattr(
+                            filter_metrics,
+                            "n_slates" if allow_mirrors else "n_slates_no_mirror",
+                            0,
+                        )
+
+                        if n_slates == 0:
+                            rows.append(
+                                {
+                                    "bucket": bucket,
+                                    "model": model,
+                                    "strategy": strategy,
+                                    "filter": filter_type,
+                                    "allow_mirrors": allow_mirrors,
+                                    "n_slates": n_slates,
+                                    "wins": float("nan"),
+                                    "win_rate": float("nan"),
+                                    "winnings": float("nan"),
+                                    "wilson_95_low": float("nan"),
+                                    "wilson_95_high": float("nan"),
+                                    "jeffreys_95_low": float("nan"),
+                                    "jeffreys_95_high": float("nan"),
+                                    "p_breakeven": float("nan"),
+                                }
+                            )
+                        else:
+                            win_rate = getattr(
+                                filter_metrics,
+                                "win_rate" if allow_mirrors else "win_rate_no_mirror",
+                                0.0,
+                            )
+                            winnings = round(
+                                getattr(
+                                    filter_metrics,
+                                    "winnings"
+                                    if allow_mirrors
+                                    else "winnings_no_mirror",
+                                    0.0,
+                                ),
+                                2,
+                            )
+                            wins = win_rate * n_slates
+                            wilson = wilson_interval(wins, n_slates)
+                            jeff = jeffreys_interval(wins, n_slates)
+                            p_breakeven = round(
+                                prob_beating_breakeven(wins, n_slates) * 100, 2
+                            )
+                            rows.append(
+                                {
+                                    "bucket": bucket,
+                                    "model": model,
+                                    "strategy": strategy,
+                                    "filter": filter_type,
+                                    "allow_mirrors": allow_mirrors,
+                                    "n_slates": n_slates,
+                                    "wins": round(wins, 2),
+                                    "win_rate": round(win_rate * 100, 2),
+                                    "winnings": winnings,
+                                    "wilson_95_low": round(wilson[0] * 100, 2),
+                                    "wilson_95_high": round(wilson[1] * 100, 2),
+                                    "jeffreys_95_low": round(jeff[0] * 100, 2),
+                                    "jeffreys_95_high": round(jeff[1] * 100, 2),
+                                    "p_breakeven": p_breakeven,
+                                }
+                            )
     return pd.DataFrame(rows)
 
 
@@ -530,17 +560,20 @@ def summarize_win_rate(
     n: int,
     breakeven: float = 0.56,
 ):
-    p_win = wins / n if n > 0 else 0.0
+    if n == 0:
+        print("0 Slates. Skipping")
+    else:
+        p_win = wins / n
 
-    wilson = wilson_interval(wins, n)
-    jeff = jeffreys_interval(wins, n)
-    p_breakeven = prob_beating_breakeven(wins, n)
+        wilson = wilson_interval(wins, n)
+        jeff = jeffreys_interval(wins, n)
+        p_breakeven = prob_beating_breakeven(wins, n)
 
-    print(f"Observed win rate: {p_win:.2%} ({wins}/{n})")
+        print(f"Observed win rate: {p_win:.2%} ({wins:.2f}/{n})")
 
-    print(f"Wilson 95% CI:   [{wilson[0]:.2%}, {wilson[1]:.2%}]")
-    print(f"Jeffreys 95% CI: [{jeff[0]:.2%}, {jeff[1]:.2%}]")
-    print(f"P(win rate > 56%) = {p_breakeven:.1%}")
+        print(f"Wilson 95% CI:   [{wilson[0]:.2%}, {wilson[1]:.2%}]")
+        print(f"Jeffreys 95% CI: [{jeff[0]:.2%}, {jeff[1]:.2%}]")
+        print(f"P(win rate > 56%) = {p_breakeven:.1%}")
 
 
 def validate_lineup(
@@ -794,21 +827,21 @@ def evaluate_h2h_lineups(
     )[0]
 
     for strategy in STRATEGIES:
-        lineup = None
+        my_lineup = None
         no_mirror_count = 0
 
         if strategy == "max_fpts":
-            lineup = baseline_proj
+            my_lineup = baseline_proj
         elif strategy == "adjusted_fragile":
-            lineup = adjusted_fragile_lineup
+            my_lineup = adjusted_fragile_lineup
         elif strategy == "adjusted_fragile_minutes_floor":
-            lineup = adjusted_fragile_minutes_floor_lineup
+            my_lineup = adjusted_fragile_minutes_floor_lineup
         else:
             raise ValueError("Invalid strategy")
 
         for fee in range(1, 4):
             contest_result, _ = evaluate_contest(
-                lineup,
+                my_lineup,
                 getattr(h2h_results, f"lineup_{fee}"),
                 top_10_median_actual,
                 slate_id,
@@ -818,36 +851,42 @@ def evaluate_h2h_lineups(
                 opponent=getattr(h2h_results, f"opponent_{fee}"),
             )
 
-            win = 1 - contest_result.win
             winnings = calculate_winnings(
-                fee, 1 - contest_result.win, contest_result.is_mirror
+                fee, contest_result.win, contest_result.is_mirror
             )
 
             if strategy == "max_fpts":
-                max_fpts_wins += win
+                max_fpts_wins += contest_result.win
                 lineup_result.max_fpts.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    lineup_result.max_fpts.winnings_no_mirror += winnings
-                    max_fpts_wins_no_mirror += win
+                    if lineup_result.max_fpts.winnings_no_mirror:
+                        lineup_result.max_fpts.winnings_no_mirror += winnings
+                    else:
+                        lineup_result.max_fpts.winnings_no_mirror = winnings
+                    max_fpts_wins_no_mirror += contest_result.win
                     no_mirror_count += 1
             elif strategy == "adjusted_fragile":
-                adjusted_fragile_wins += win
+                adjusted_fragile_wins += contest_result.win
                 lineup_result.adjusted_fragile.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    lineup_result.adjusted_fragile.winnings_no_mirror += winnings
-                    adjusted_fragile_wins_no_mirror += win
+                    if lineup_result.adjusted_fragile.winnings_no_mirror:
+                        lineup_result.adjusted_fragile.winnings_no_mirror += winnings
+                    else:
+                        lineup_result.adjusted_fragile.winnings_no_mirror = winnings
+                    adjusted_fragile_wins_no_mirror += contest_result.win
                     no_mirror_count += 1
             elif strategy == "adjusted_fragile_minutes_floor":
-                adjusted_fragile_minutes_floor_wins += win
+                adjusted_fragile_minutes_floor_wins += contest_result.win
                 lineup_result.adjusted_fragile_minutes_floor.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror += (
-                        winnings
-                    )
-                    adjusted_fragile_minutes_floor_wins_no_mirror += win
+                    if lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror:
+                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror += winnings
+                    else:
+                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror = winnings
+                    adjusted_fragile_minutes_floor_wins_no_mirror += contest_result.win
                     no_mirror_count += 1
 
         if no_mirror_count > 0:
@@ -874,8 +913,8 @@ def evaluate_h2h_lineups(
 
 
 def evaluate_contest(
-    baseline_proj,
-    lineup,
+    my_lineup,
+    opponent_lineup,
     top_10_median_actual,
     slate_id,
     slate_games,
@@ -883,42 +922,33 @@ def evaluate_contest(
     fee=1,
     opponent="",
 ):
-    win_vs_proj = 0.0
-    is_mirror = lineup.players == baseline_proj.players
+    win_vs_opponent = 0.0
+    is_mirror = opponent_lineup.players == my_lineup.players
 
     if is_mirror:
-        win_vs_proj = 0.5  # tie
-    elif lineup.actual_fpts > baseline_proj.actual_fpts:
-        win_vs_proj = 1.0  # win
-    elif lineup.actual_fpts < baseline_proj.actual_fpts:
-        win_vs_proj = 0.0  # loss
+        win_vs_opponent = 0.5  # tie
+    elif opponent_lineup.actual_fpts < my_lineup.actual_fpts:
+        win_vs_opponent = 1.0  # win
+    elif opponent_lineup.actual_fpts > my_lineup.actual_fpts:
+        win_vs_opponent = 0.0  # loss
     else:
-        win_vs_proj = 0.5  # tie (rare with different lineups)
+        win_vs_opponent = 0.5  # tie (rare with different lineups)
 
     win_vs_top_10_median = 0.0
 
-    if lineup.actual_fpts > top_10_median_actual:
+    if my_lineup.actual_fpts > top_10_median_actual:
         win_vs_top_10_median = 1.0  # win
-    elif lineup.actual_fpts < top_10_median_actual:
+    elif my_lineup.actual_fpts < top_10_median_actual:
         win_vs_top_10_median = 0.0  # loss
     else:
         win_vs_top_10_median = 0.5  # tie (rare with different lineups)
 
-    winnings = -fee
-
-    if is_mirror:
-        winnings = 0
-    elif lineup.actual_fpts < baseline_proj.actual_fpts:
-        winnings = fee * 0.8
-    elif lineup.actual_fpts == baseline_proj.actual_fpts:
-        winnings = -fee * 0.2
-
     opponent_result = OpponentResult(
         slate_id=slate_id,
-        opponent_score=lineup.actual_fpts,
-        my_score=baseline_proj.actual_fpts,
-        win=win_vs_proj,
-        margin=lineup.actual_fpts - baseline_proj.actual_fpts,
+        opponent_score=opponent_lineup.actual_fpts,
+        my_score=my_lineup.actual_fpts,
+        win=win_vs_opponent,
+        margin=opponent_lineup.actual_fpts - my_lineup.actual_fpts,
         is_mirror=is_mirror,
         opponent=opponent,
     )
@@ -927,14 +957,13 @@ def evaluate_contest(
         slate_id=slate_id,
         slate_games=slate_games,
         strategy=strategy,
-        my_actual=lineup.actual_fpts,
-        baseline_proj=baseline_proj.actual_fpts,
-        win=win_vs_proj,
-        margin=lineup.actual_fpts - baseline_proj.actual_fpts,
+        my_actual=my_lineup.actual_fpts,
+        baseline_proj=my_lineup.actual_fpts,
+        win=win_vs_opponent,
+        margin=my_lineup.actual_fpts - opponent_lineup.actual_fpts,
         is_mirror=is_mirror,
         win_median=win_vs_top_10_median,
-        margin_median=lineup.actual_fpts - top_10_median_actual,
-        winnings=winnings,
+        margin_median=my_lineup.actual_fpts - top_10_median_actual,
         opponent=opponent,
     )
 
@@ -967,19 +996,22 @@ def aggregate_slate_results(
                 strategy_dest = getattr(model_dest, strategy)
                 for filter_type in FILTER_TYPES:
                     filter_dest = getattr(strategy_dest, filter_type)
-                    denom = getattr(filter_dest, "n_slates") or 1
-                    setattr(
-                        filter_dest,
-                        "win_rate",
-                        getattr(filter_dest, "win_rate") / denom,
-                    )
+                    denom = getattr(filter_dest, "n_slates")
+                    if denom > 0:
+                        setattr(
+                            filter_dest,
+                            "win_rate",
+                            getattr(filter_dest, "win_rate") / denom,
+                        )
 
-                    denom_no_mirror = getattr(filter_dest, "n_slates_no_mirror") or 1
-                    setattr(
-                        filter_dest,
-                        "win_rate_no_mirror",
-                        getattr(filter_dest, "win_rate_no_mirror") / denom_no_mirror,
-                    )
+                    denom_no_mirror = getattr(filter_dest, "n_slates_no_mirror")
+                    if denom_no_mirror > 0:
+                        setattr(
+                            filter_dest,
+                            "win_rate_no_mirror",
+                            getattr(filter_dest, "win_rate_no_mirror")
+                            / denom_no_mirror,
+                        )
 
     for slate in results:
         bucket = slate_bucket(slate.slate_games)
@@ -990,13 +1022,13 @@ def aggregate_slate_results(
             update_aggregate_linuep_metrics(model, slate, agg)
             update_aggregate_linuep_metrics(model, slate, agg_all)
 
-    # for agg in bucketed.values():
-    #     finalize(agg)
+    for agg in bucketed.values():
+        finalize(agg)
 
     finalize(overall)
 
-    # result = dict(bucketed)
-    result = {}
+    result = dict(bucketed)
+    # result = {}
     result["overall"] = overall
     return result
 
@@ -1039,7 +1071,8 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
                 filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
                 old_winnings = getattr(filter_dest, filter_winnings)
                 val_winnings = getattr(strategy_src, filter_winnings)
-                setattr(filter_dest, filter_winnings, old_winnings + val_winnings)
+                if val_winnings is not None:
+                    setattr(filter_dest, filter_winnings, old_winnings + val_winnings)
 
 
 def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
@@ -1172,7 +1205,7 @@ if __name__ == "__main__":
 
     aggregate = aggregate_slate_results(slate_results)
     print_evaluation(aggregate)
-    # eval_df = evaluation_to_df(aggregate)
+    eval_df = evaluation_to_df(aggregate)
     out_path = Path("data/processed/backtest_eval.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # eval_df.to_csv(out_path, index=False)
+    eval_df.to_csv(out_path, index=False)
