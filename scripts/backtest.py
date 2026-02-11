@@ -65,6 +65,9 @@ FILTER_TYPES = [
     "no_late_swaps",
     "missing_late_swaps",
     "late_swaps",
+    "fee_1",
+    "fee_2",
+    "fee_3",
 ]
 
 
@@ -100,6 +103,15 @@ class AggregateFilterMetrics:
         default_factory=AggregateStrategyMetrics
     )
     late_swaps: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    fee_1: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    fee_2: AggregateStrategyMetrics = dataclasses.field(
+        default_factory=AggregateStrategyMetrics
+    )
+    fee_3: AggregateStrategyMetrics = dataclasses.field(
         default_factory=AggregateStrategyMetrics
     )
 
@@ -172,6 +184,14 @@ class StrategyResult:
     win_rate_no_mirror: float | None = None
     winnings: float = 0.0
     winnings_no_mirror: float | None = None
+    win_rate_by_fee: dict[int, float] = dataclasses.field(default_factory=dict)
+    win_rate_no_mirror_by_fee: dict[int, float] = dataclasses.field(
+        default_factory=dict
+    )
+    winnings_by_fee: dict[int, float] = dataclasses.field(default_factory=dict)
+    winnings_no_mirror_by_fee: dict[int, float] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass
@@ -906,6 +926,14 @@ def evaluate_h2h_lineups(
                 fee, contest_result.win, contest_result.is_mirror
             )
 
+            strategy_result = getattr(lineup_result, strategy)
+            strategy_result.win_rate_by_fee[fee] = contest_result.win
+            strategy_result.winnings_by_fee[fee] = winnings
+
+            if not contest_result.is_mirror:
+                strategy_result.win_rate_no_mirror_by_fee[fee] = contest_result.win
+                strategy_result.winnings_no_mirror_by_fee[fee] = winnings
+
             if strategy == "max_fpts":
                 max_fpts_wins += contest_result.win
                 lineup_result.max_fpts.winnings += winnings
@@ -1097,6 +1125,22 @@ def collect_slate_values(
             for strategy in STRATEGIES:
                 strategy_result = getattr(model_result, strategy)
                 for filter_type in FILTER_TYPES:
+                    if filter_type in {"fee_1", "fee_2", "fee_3"}:
+                        fee = int(filter_type.split("_")[1])
+                        for allow_mirrors in [True, False]:
+                            if allow_mirrors:
+                                val = strategy_result.win_rate_by_fee.get(fee)
+                            else:
+                                val = strategy_result.win_rate_no_mirror_by_fee.get(fee)
+                            if val is None:
+                                continue
+                            values[
+                                (bucket, model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+                            values[
+                                ("overall", model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+                        continue
                     if filter_type == "no_late_swaps" and slate.has_late_swaps:
                         continue
                     if filter_type == "missing_late_swaps" and not (
@@ -1134,6 +1178,8 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
     model_src = getattr(slate, model_name.split("_")[0])  # LineupResult
     model_dest = getattr(agg, model_name)  # AggregateLineupMetrics
 
+    fee_filters = {"fee_1", "fee_2", "fee_3"}
+
     # Update win-rate and winnings
     for strategy in STRATEGIES:
         strategy_dest = getattr(model_dest, strategy)
@@ -1141,23 +1187,38 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
         for filter_type in FILTER_TYPES:
             filter_dest = getattr(strategy_dest, filter_type)
 
-            if filter_type == "no_late_swaps" and slate.has_late_swaps:
-                continue
+            if filter_type not in fee_filters:
+                if filter_type == "no_late_swaps" and slate.has_late_swaps:
+                    continue
 
-            if filter_type == "missing_late_swaps" and not (
-                slate.has_late_swaps and slate.missing_late_swap_proj
-            ):
-                continue
+                if filter_type == "missing_late_swaps" and not (
+                    slate.has_late_swaps and slate.missing_late_swap_proj
+                ):
+                    continue
 
-            if filter_type == "late_swaps" and not (
-                slate.has_late_swaps and not slate.missing_late_swap_proj
-            ):
-                continue
+                if filter_type == "late_swaps" and not (
+                    slate.has_late_swaps and not slate.missing_late_swap_proj
+                ):
+                    continue
 
             for allow_mirrors in [True, False]:
                 filter_win_rate = "win_rate" if allow_mirrors else "win_rate_no_mirror"
                 old_win_rate = getattr(filter_dest, filter_win_rate)
-                val_win_rate = getattr(strategy_src, filter_win_rate)
+
+                if filter_type in fee_filters:
+                    fee = int(filter_type.split("_")[1])
+                    if allow_mirrors:
+                        val_win_rate = strategy_src.win_rate_by_fee.get(fee)
+                        val_winnings = strategy_src.winnings_by_fee.get(fee)
+                    else:
+                        val_win_rate = strategy_src.win_rate_no_mirror_by_fee.get(fee)
+                        val_winnings = strategy_src.winnings_no_mirror_by_fee.get(fee)
+                else:
+                    val_win_rate = getattr(strategy_src, filter_win_rate)
+                    val_winnings = getattr(
+                        strategy_src,
+                        "winnings" if allow_mirrors else "winnings_no_mirror",
+                    )
 
                 if val_win_rate is not None:
                     setattr(filter_dest, filter_win_rate, old_win_rate + val_win_rate)
@@ -1166,9 +1227,8 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
                     setattr(filter_dest, n_slates, old_n_slates + 1)
 
                 filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
-                old_winnings = getattr(filter_dest, filter_winnings)
-                val_winnings = getattr(strategy_src, filter_winnings)
                 if val_winnings is not None:
+                    old_winnings = getattr(filter_dest, filter_winnings)
                     setattr(filter_dest, filter_winnings, old_winnings + val_winnings)
 
 
