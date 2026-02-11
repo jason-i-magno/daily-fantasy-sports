@@ -114,6 +114,9 @@ class AggregateFilterMetrics:
     fee_3: AggregateStrategyMetrics = dataclasses.field(
         default_factory=AggregateStrategyMetrics
     )
+    by_slate: dict[str, AggregateStrategyMetrics] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass
@@ -222,6 +225,7 @@ class SlateResult:
     has_late_swaps: bool = True
     missing_late_swap_proj: bool = False
     slate_games: int = 0
+    slate: str = ""
 
 
 @dataclasses.dataclass
@@ -478,8 +482,14 @@ def print_evaluation(
             print(f"=== {model.upper()} ===")
             for strategy in STRATEGIES:
                 strategy_metrics = getattr(model_metrics, strategy)
-                for filter_type in FILTER_TYPES:
-                    filter_metrics = getattr(strategy_metrics, filter_type)
+                filter_types = list(FILTER_TYPES) + sorted(
+                    strategy_metrics.by_slate.keys()
+                )
+                for filter_type in filter_types:
+                    if filter_type in strategy_metrics.by_slate:
+                        filter_metrics = strategy_metrics.by_slate[filter_type]
+                    else:
+                        filter_metrics = getattr(strategy_metrics, filter_type)
                     for allow_mirrors in [False, True]:
                         print(
                             f"\n==={model.upper()} {strategy.upper()} {filter_type.upper()}{'' if allow_mirrors else ' NO MIRROR'}==="
@@ -528,8 +538,14 @@ def evaluation_to_df(
                 continue
             for strategy in STRATEGIES:
                 strategy_metrics = getattr(model_metrics, strategy)
-                for filter_type in FILTER_TYPES:
-                    filter_metrics = getattr(strategy_metrics, filter_type)
+                filter_types = list(FILTER_TYPES) + sorted(
+                    strategy_metrics.by_slate.keys()
+                )
+                for filter_type in filter_types:
+                    if filter_type in strategy_metrics.by_slate:
+                        filter_metrics = strategy_metrics.by_slate[filter_type]
+                    else:
+                        filter_metrics = getattr(strategy_metrics, filter_type)
                     for allow_mirrors in [True, False]:
                         key = (bucket, model, strategy, filter_type, allow_mirrors)
                         vals = slate_values.get(key, [])
@@ -1071,8 +1087,12 @@ def aggregate_slate_results(
             model_dest = getattr(target, model)
             for strategy in STRATEGIES:
                 strategy_dest = getattr(model_dest, strategy)
-                for filter_type in FILTER_TYPES:
-                    filter_dest = getattr(strategy_dest, filter_type)
+                filter_types = list(FILTER_TYPES) + list(strategy_dest.by_slate.keys())
+                for filter_type in filter_types:
+                    if filter_type in strategy_dest.by_slate:
+                        filter_dest = strategy_dest.by_slate[filter_type]
+                    else:
+                        filter_dest = getattr(strategy_dest, filter_type)
                     denom = getattr(filter_dest, "n_slates")
                     if denom > 0:
                         setattr(
@@ -1124,6 +1144,21 @@ def collect_slate_values(
             model_result = getattr(slate, model)
             for strategy in STRATEGIES:
                 strategy_result = getattr(model_result, strategy)
+                slate_filter = getattr(slate, "slate", "")
+                if slate_filter:
+                    for allow_mirrors in [True, False]:
+                        if allow_mirrors:
+                            val = strategy_result.win_rate
+                        else:
+                            val = strategy_result.win_rate_no_mirror
+                        if val is None:
+                            continue
+                        values[
+                            (bucket, model, strategy, slate_filter, allow_mirrors)
+                        ].append(val)
+                        values[
+                            ("overall", model, strategy, slate_filter, allow_mirrors)
+                        ].append(val)
                 for filter_type in FILTER_TYPES:
                     if filter_type in {"fee_1", "fee_2", "fee_3"}:
                         fee = int(filter_type.split("_")[1])
@@ -1179,11 +1214,41 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
     model_dest = getattr(agg, model_name)  # AggregateLineupMetrics
 
     fee_filters = {"fee_1", "fee_2", "fee_3"}
+    slate_filter = slate.slate
 
     # Update win-rate and winnings
     for strategy in STRATEGIES:
         strategy_dest = getattr(model_dest, strategy)
         strategy_src = getattr(model_src, strategy)
+
+        if slate_filter:
+            slate_dest = strategy_dest.by_slate.setdefault(
+                slate_filter, AggregateStrategyMetrics()
+            )
+            for allow_mirrors in [True, False]:
+                filter_win_rate = (
+                    "win_rate" if allow_mirrors else "win_rate_no_mirror"
+                )
+                val_win_rate = getattr(strategy_src, filter_win_rate)
+                if val_win_rate is not None:
+                    setattr(
+                        slate_dest,
+                        filter_win_rate,
+                        getattr(slate_dest, filter_win_rate) + val_win_rate,
+                    )
+                    n_slates = "n_slates" if allow_mirrors else "n_slates_no_mirror"
+                    setattr(slate_dest, n_slates, getattr(slate_dest, n_slates) + 1)
+
+                filter_winnings = (
+                    "winnings" if allow_mirrors else "winnings_no_mirror"
+                )
+                val_winnings = getattr(strategy_src, filter_winnings)
+                if val_winnings is not None:
+                    setattr(
+                        slate_dest,
+                        filter_winnings,
+                        getattr(slate_dest, filter_winnings) + val_winnings,
+                    )
         for filter_type in FILTER_TYPES:
             filter_dest = getattr(strategy_dest, filter_type)
 
@@ -1251,6 +1316,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
     n_game_times = len(game_times)
     slate_result = SlateResult()
+    slate_result.slate = meta.slate
 
     if n_game_times == 1:
         slate_result.has_late_swaps = False
