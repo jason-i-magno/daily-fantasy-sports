@@ -185,8 +185,8 @@ def adjusted_score(proj_fpts, proj_minutes, tfm, games):
 def blend_projections(
     rg_df: pd.DataFrame,
     etr_df: pd.DataFrame,
-    weight_rg: float = 0.4,
-    weight_etr: float = 0.6,
+    weight_rg: float = 0.5,
+    weight_etr: float = 0.5,
 ) -> pd.DataFrame:
     rg = rg_df.rename(
         columns={

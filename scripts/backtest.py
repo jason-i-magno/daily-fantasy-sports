@@ -14,13 +14,16 @@ TODO: extend with ownership-aware baselines, entry-fee buckets, and per-position
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import math
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Set, Tuple
 
+import numpy as np
 import pandas as pd
 from scipy.stats import beta
 from utils import (
@@ -439,7 +442,12 @@ def lineup_from_player_keys(
     )
 
 
-def print_evaluation(eval_by_bucket: dict[str, AllSlatesEvaluation]):
+def print_evaluation(
+    eval_by_bucket: dict[str, AllSlatesEvaluation],
+    slate_values: dict[tuple[str, str, str, str, bool], list[float]],
+    breakeven: float = 0.56,
+    n_boot: int = 20000,
+):
     for bucket, eval in sorted(eval_by_bucket.items()):
         print("\n==============================")
         print(f"Slate bucket: {bucket}")
@@ -456,24 +464,40 @@ def print_evaluation(eval_by_bucket: dict[str, AllSlatesEvaluation]):
                         print(
                             f"\n==={model.upper()} {strategy.upper()} {filter_type.upper()}{'' if allow_mirrors else ' NO MIRROR'}==="
                         )
-                        wins = (
-                            filter_metrics.win_rate * filter_metrics.n_slates
-                            if allow_mirrors
-                            else filter_metrics.win_rate_no_mirror
-                            * filter_metrics.n_slates_no_mirror
+                        key = (bucket, model, strategy, filter_type, allow_mirrors)
+                        vals = slate_values.get(key, [])
+                        if not vals:
+                            print("0 Slates. Skipping")
+                            continue
+
+                        seed = stable_seed(
+                            bucket, model, strategy, filter_type, allow_mirrors
                         )
-                        n_slates = (
-                            filter_metrics.n_slates
-                            if allow_mirrors
-                            else filter_metrics.n_slates_no_mirror
+                        point, lo, hi = bootstrap_mean_ci(
+                            vals, n_boot=n_boot, seed=seed
                         )
-                        summarize_win_rate(wins, n_slates)
+                        p_gt = bootstrap_prob_mean_gt(
+                            vals, breakeven, n_boot=n_boot, seed=seed
+                        )
+                        wins = point * len(vals)
+                        n_slates = len(vals)
+
+                        print(
+                            f"Observed slate-avg win rate: {point:.2%} ({wins:.2f}/{n_slates})"
+                        )
+                        print(f"Bootstrap 95% CI: [{lo:.2%}, {hi:.2%}]")
+                        print(f"Bootstrap P(mean > {breakeven:.0%}) = {p_gt:.1%}")
                         print(
                             f"Winnings: ${filter_metrics.winnings if allow_mirrors else filter_metrics.winnings_no_mirror:.2f}"
                         )
 
 
-def evaluation_to_df(eval_by_bucket: dict[str, AllSlatesEvaluation]) -> pd.DataFrame:
+def evaluation_to_df(
+    eval_by_bucket: dict[str, AllSlatesEvaluation],
+    slate_values: dict[tuple[str, str, str, str, bool], list[float]],
+    breakeven: float = 0.56,
+    n_boot: int = 20000,
+) -> pd.DataFrame:
     """Flatten bucketed evaluation into a dataframe for writing to disk."""
     rows = []
 
@@ -487,11 +511,9 @@ def evaluation_to_df(eval_by_bucket: dict[str, AllSlatesEvaluation]) -> pd.DataF
                 for filter_type in FILTER_TYPES:
                     filter_metrics = getattr(strategy_metrics, filter_type)
                     for allow_mirrors in [True, False]:
-                        n_slates = getattr(
-                            filter_metrics,
-                            "n_slates" if allow_mirrors else "n_slates_no_mirror",
-                            0,
-                        )
+                        key = (bucket, model, strategy, filter_type, allow_mirrors)
+                        vals = slate_values.get(key, [])
+                        n_slates = len(vals)
 
                         if n_slates == 0:
                             rows.append(
@@ -501,79 +523,64 @@ def evaluation_to_df(eval_by_bucket: dict[str, AllSlatesEvaluation]) -> pd.DataF
                                     "strategy": strategy,
                                     "filter": filter_type,
                                     "allow_mirrors": allow_mirrors,
-                                    "n_slates": n_slates,
+                                    "n_slates": 0,
                                     "wins": float("nan"),
                                     "win_rate": float("nan"),
                                     "winnings": float("nan"),
-                                    "wilson_95_low": float("nan"),
-                                    "wilson_95_high": float("nan"),
-                                    "jeffreys_95_low": float("nan"),
-                                    "jeffreys_95_high": float("nan"),
-                                    "p_breakeven": float("nan"),
+                                    "boot_95_low": float("nan"),
+                                    "boot_95_high": float("nan"),
+                                    "boot_p_breakeven": float("nan"),
                                 }
                             )
-                        else:
-                            win_rate = getattr(
-                                filter_metrics,
-                                "win_rate" if allow_mirrors else "win_rate_no_mirror",
-                                0.0,
-                            )
-                            winnings = round(
-                                getattr(
-                                    filter_metrics,
-                                    "winnings"
-                                    if allow_mirrors
-                                    else "winnings_no_mirror",
-                                    0.0,
-                                ),
-                                2,
-                            )
-                            wins = win_rate * n_slates
-                            wilson = wilson_interval(wins, n_slates)
-                            jeff = jeffreys_interval(wins, n_slates)
-                            p_breakeven = round(
-                                prob_beating_breakeven(wins, n_slates) * 100, 2
-                            )
-                            rows.append(
-                                {
-                                    "bucket": bucket,
-                                    "model": model,
-                                    "strategy": strategy,
-                                    "filter": filter_type,
-                                    "allow_mirrors": allow_mirrors,
-                                    "n_slates": n_slates,
-                                    "wins": round(wins, 2),
-                                    "win_rate": round(win_rate * 100, 2),
-                                    "winnings": winnings,
-                                    "wilson_95_low": round(wilson[0] * 100, 2),
-                                    "wilson_95_high": round(wilson[1] * 100, 2),
-                                    "jeffreys_95_low": round(jeff[0] * 100, 2),
-                                    "jeffreys_95_high": round(jeff[1] * 100, 2),
-                                    "p_breakeven": p_breakeven,
-                                }
-                            )
+                            continue
+
+                        seed = stable_seed(
+                            bucket, model, strategy, filter_type, allow_mirrors
+                        )
+                        point, lo, hi = bootstrap_mean_ci(
+                            vals, n_boot=n_boot, seed=seed
+                        )
+                        p_gt = bootstrap_prob_mean_gt(
+                            vals, breakeven, n_boot=n_boot, seed=seed
+                        )
+                        wins = point * n_slates
+                        winnings = getattr(
+                            filter_metrics,
+                            "winnings" if allow_mirrors else "winnings_no_mirror",
+                            None,
+                        )
+                        rows.append(
+                            {
+                                "bucket": bucket,
+                                "model": model,
+                                "strategy": strategy,
+                                "filter": filter_type,
+                                "allow_mirrors": allow_mirrors,
+                                "n_slates": n_slates,
+                                "wins": round(wins, 2),
+                                "win_rate": round(point * 100, 2),
+                                "winnings": round(winnings, 2)
+                                if winnings is not None
+                                else float("nan"),
+                                "boot_95_low": round(lo * 100, 2),
+                                "boot_95_high": round(hi * 100, 2),
+                                "boot_p_breakeven": round(p_gt * 100, 2),
+                            }
+                        )
     return pd.DataFrame(rows)
 
 
-def summarize_win_rate(
-    wins: int,
-    n: int,
-    breakeven: float = 0.56,
-):
-    if n == 0:
-        print("0 Slates. Skipping")
-    else:
-        p_win = wins / n
-
-        wilson = wilson_interval(wins, n)
-        jeff = jeffreys_interval(wins, n)
-        p_breakeven = prob_beating_breakeven(wins, n)
-
-        print(f"Observed win rate: {p_win:.2%} ({wins:.2f}/{n})")
-
-        print(f"Wilson 95% CI:   [{wilson[0]:.2%}, {wilson[1]:.2%}]")
-        print(f"Jeffreys 95% CI: [{jeff[0]:.2%}, {jeff[1]:.2%}]")
-        print(f"P(win rate > 56%) = {p_breakeven:.1%}")
+def stable_seed(
+    bucket: str, model: str, strategy: str, filter_type: str, allow_mirrors: bool
+) -> int:
+    """
+    Deterministic 32-bit seed derived from the group key.
+    Stable across Python runs/machines.
+    """
+    key_str = f"{bucket}|{model}|{strategy}|{filter_type}|{int(allow_mirrors)}"
+    digest = hashlib.blake2b(key_str.encode("utf-8"), digest_size=8).digest()
+    # Use lower 32 bits for a NumPy seed
+    return int.from_bytes(digest, byteorder="little") & 0xFFFFFFFF
 
 
 def validate_lineup(
@@ -779,6 +786,50 @@ def wilson_interval(
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
+def bootstrap_mean_ci(
+    values: list[float],
+    n_boot: int = 20000,
+    alpha: float = 0.05,
+    seed: int = 123,
+) -> tuple[float, float, float]:
+    """Percentile bootstrap CI for the mean of slate-level values. Returns (mean, lo, hi)."""
+    x = np.asarray(values, dtype=float)
+    x = x[~np.isnan(x)]
+    n = len(x)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    if n == 1:
+        val = float(x[0])
+        return (val, val, val)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_means = x[idx].mean(axis=1)
+    mean = float(x.mean())
+    lo = float(np.quantile(boot_means, alpha / 2))
+    hi = float(np.quantile(boot_means, 1 - alpha / 2))
+    return (mean, lo, hi)
+
+
+def bootstrap_prob_mean_gt(
+    values: list[float],
+    threshold: float,
+    n_boot: int = 20000,
+    seed: int = 123,
+) -> float:
+    """Bootstrap probability that mean(values) > threshold (frequency under bootstrap resampling)."""
+    x = np.asarray(values, dtype=float)
+    x = x[~np.isnan(x)]
+    n = len(x)
+    if n == 0:
+        return float("nan")
+    if n == 1:
+        return float(x[0] > threshold)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_boot, n))
+    boot_means = x[idx].mean(axis=1)
+    return float((boot_means > threshold).mean())
+
+
 # ----------------------------
 # Evaluation
 # ----------------------------
@@ -860,7 +911,7 @@ def evaluate_h2h_lineups(
                 lineup_result.max_fpts.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    if lineup_result.max_fpts.winnings_no_mirror:
+                    if lineup_result.max_fpts.winnings_no_mirror is not None:
                         lineup_result.max_fpts.winnings_no_mirror += winnings
                     else:
                         lineup_result.max_fpts.winnings_no_mirror = winnings
@@ -871,7 +922,7 @@ def evaluate_h2h_lineups(
                 lineup_result.adjusted_fragile.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    if lineup_result.adjusted_fragile.winnings_no_mirror:
+                    if lineup_result.adjusted_fragile.winnings_no_mirror is not None:
                         lineup_result.adjusted_fragile.winnings_no_mirror += winnings
                     else:
                         lineup_result.adjusted_fragile.winnings_no_mirror = winnings
@@ -882,7 +933,10 @@ def evaluate_h2h_lineups(
                 lineup_result.adjusted_fragile_minutes_floor.winnings += winnings
 
                 if not contest_result.is_mirror:
-                    if lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror:
+                    if (
+                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror
+                        is not None
+                    ):
                         lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror += winnings
                     else:
                         lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror = winnings
@@ -970,17 +1024,12 @@ def evaluate_contest(
     return contest_result, opponent_result
 
 
-from collections import defaultdict
-
-
 def slate_bucket(games: int) -> str:
-    # if games <= 4:
-    #     return "2-4"
-    # if games <= 8:
-    #     return "5-8"
-    # return "9+"
-
-    return str(games)
+    if games <= 4:
+        return "2-4"
+    if games <= 8:
+        return "5-8"
+    return "9+"
 
 
 def aggregate_slate_results(
@@ -1031,6 +1080,54 @@ def aggregate_slate_results(
     # result = {}
     result["overall"] = overall
     return result
+
+
+def collect_slate_values(
+    slate_results: list[SlateResult],
+) -> dict[tuple[str, str, str, str, bool], list[float]]:
+    """
+    Map (bucket, model, strategy, filter_type, allow_mirrors) -> list of per-slate win_rate values.
+    Each list contains one value per slate, gated by filter type.
+    """
+    values: dict[tuple[str, str, str, str, bool], list[float]] = defaultdict(list)
+    for slate in slate_results:
+        bucket = slate_bucket(slate.slate_games)
+        for model in MODELS:
+            model_result = getattr(slate, model)
+            for strategy in STRATEGIES:
+                strategy_result = getattr(model_result, strategy)
+                for filter_type in FILTER_TYPES:
+                    if filter_type == "no_late_swaps" and slate.has_late_swaps:
+                        continue
+                    if filter_type == "missing_late_swaps" and not (
+                        slate.has_late_swaps and slate.missing_late_swap_proj
+                    ):
+                        continue
+                    if filter_type == "late_swaps" and not (
+                        slate.has_late_swaps and not slate.missing_late_swap_proj
+                    ):
+                        continue
+
+                    for allow_mirrors in [True, False]:
+                        if allow_mirrors:
+                            val = strategy_result.win_rate
+                            values[
+                                (bucket, model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+                            values[
+                                ("overall", model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+                        else:
+                            val = strategy_result.win_rate_no_mirror
+                            if val is None:
+                                continue
+                            values[
+                                (bucket, model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+                            values[
+                                ("overall", model, strategy, filter_type, allow_mirrors)
+                            ].append(val)
+    return dict(values)
 
 
 def update_aggregate_linuep_metrics(model_name, slate, agg):
@@ -1204,8 +1301,9 @@ if __name__ == "__main__":
         slate_results.append(slate_result)
 
     aggregate = aggregate_slate_results(slate_results)
-    print_evaluation(aggregate)
-    eval_df = evaluation_to_df(aggregate)
+    slate_values = collect_slate_values(slate_results)
+    print_evaluation(aggregate, slate_values)
+    eval_df = evaluation_to_df(aggregate, slate_values)
     out_path = Path("data/processed/backtest_eval.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     eval_df.to_csv(out_path, index=False)
