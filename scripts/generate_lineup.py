@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -24,7 +22,6 @@ from sqlalchemy import select
 from db.models import Contest, Player, Projection, Salary, Source
 from db.session import SessionLocal
 from scripts.utils import (
-    CANDIDATE_LINEUPS_DIR,
     ET,
     MT,
     SLOT_ORDER,
@@ -32,7 +29,6 @@ from scripts.utils import (
     adjusted_score,
     blend_projections,
     get_proj_cols,
-    lineup_df_to_player_keys,
     load_dk_salaries_csv,
     load_projections,
     parse_positions,
@@ -169,29 +165,6 @@ def load_from_db(meta, projection_source: str):
         blend_df = blend_projections(rg_df, etr_df)
 
     return dk_df, rg_df, etr_df, blend_df
-
-
-def patch_lineup_file(path: Path, top_adjusted_player_keys: List[List[int]]) -> None:
-    """
-    Add 'top_adjusted' to an existing candidate_lineups_*.json
-    without touching top_fpts or top_minutes.
-    """
-    with open(path, "r") as f:
-        data = json.load(f)
-
-    existing = "top_adjusted" in data
-
-    # Add new field
-    data["top_adjusted"] = top_adjusted_player_keys
-
-    # Write back (preserving formatting)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-    if existing:
-        print(f"[UPDATED] {path.name} (replaced top_adjusted)")
-    else:
-        print(f"[ADDED] {path.name} (created top_adjusted)")
 
 
 def write_lineup(
@@ -443,12 +416,6 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         help="Flag to write candidate lineups to a file.",
     )
     parser.add_argument(
-        "-patch",
-        "--patch-candidate-lineups",
-        action="store_true",
-        help="Flag to patch candidate lineups.",
-    )
-    parser.add_argument(
         "--use-db",
         action="store_true",
         help="Load salaries/projections from the database instead of CSVs.",
@@ -467,7 +434,6 @@ def generate_lineups(
     projection_source: str,
     k_lineups: int,
     strategy: str = "max_fpts",
-    patch_candidate_lineups: bool = False,
     locked_players: dict = {},
     game_time_filter: datetime = datetime.now(ZoneInfo("America/Denver")),
     use_db: bool = False,
@@ -571,26 +537,6 @@ def generate_lineups(
 
         lineups = sorted(lineups, key=lambda x: x["adjusted_score"], reverse=True)
 
-    if patch_candidate_lineups:
-        if projection_source == "rg":
-            candidate_subdir = "rotogrinders"
-        elif projection_source == "etr":
-            candidate_subdir = "etr"
-        elif projection_source == "blend":
-            candidate_subdir = "blend"
-
-        top_adjusted_player_keys = [
-            lineup_df_to_player_keys(lu["lineup"]) for lu in lineups
-        ]
-
-        patch_filename = f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
-        patch_path = CANDIDATE_LINEUPS_DIR / candidate_subdir / patch_filename
-
-        patch_lineup_file(
-            patch_path,
-            top_adjusted_player_keys,
-        )
-
     return lineups
 
 
@@ -598,16 +544,16 @@ def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
     locked_players = {}
-    # locked_players = {
-    #     "cadecunningham": "PG",
-    #     "jordanclarkson": "SG",
-    #     # "aaronwiggins": "SF",
-    #     # "kylefilipowski": "PF",
-    #     "mitchellrobinson": "C",
-    #     # "yukikawamura": "G",
-    #     "ausarthompson": "F",
-    #     "arielhukporti": "UTIL",
-    # }
+    locked_players = {
+        # "collingillespie": "PG",
+        # "devincarter": "SG",
+        # "niqueclifford": "SF",
+        # "dylancardwell": "PF",
+        "donovanclingan": "C",
+        "vincewilliamsjr": "G",
+        # "micahpotter": "F",
+        "jrueholiday": "UTIL",
+    }
     game_time_filter = datetime.now(MT) if args.filter_game_time else None
 
     if "T" in args.slate_id:
@@ -620,7 +566,6 @@ def main(argv: Iterable[str]) -> int:
         projection_source=args.projection_source,
         k_lineups=1,
         strategy="max_minutes",
-        patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
@@ -631,7 +576,6 @@ def main(argv: Iterable[str]) -> int:
         projection_source=args.projection_source,
         k_lineups=1,
         strategy="max_fpts",
-        patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
@@ -642,7 +586,6 @@ def main(argv: Iterable[str]) -> int:
         projection_source=args.projection_source,
         k_lineups=args.k_lineups,
         strategy="adjusted_max_fpts_minutes_floor",
-        patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,

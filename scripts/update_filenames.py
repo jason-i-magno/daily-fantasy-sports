@@ -4,11 +4,10 @@ import logging
 
 from utils import (
     ETR_PROJ_DIR,
-    RESULTS_DIR,
     RG_PROJ_DIR,
     SlateMeta,
+    get_slates,
     load_dk_salaries_csv,
-    parse_filename,
 )
 
 logger = logging.getLogger(__name__)
@@ -16,19 +15,7 @@ logger = logging.getLogger(__name__)
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    slates = []
-
-    for results_file in RESULTS_DIR.iterdir():
-        if not results_file.is_file():
-            continue
-
-        meta = parse_filename(results_file.stem)
-
-        if meta.sport != "nba":
-            continue
-
-        slates.append(meta)
-
+    slates = get_slates()
     n_slates = len(slates)
 
     slates.sort(key=lambda x: x.datetime)

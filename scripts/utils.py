@@ -89,6 +89,12 @@ RG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "rotogrinders"
 RG_OUTPUT_DIR = PROCESSED_DIR / "rotogrinders"
 RG_PROJ_DIR = RAW_LINEUPS_DIR / "rotogrinders"
 
+CANDIDATE_DIR_MAP = {
+    "blend": BLEND_CANDIDATE_DIR,
+    "etr": ETR_CANDIDATE_DIR,
+    "rg": RG_CANDIDATE_DIR,
+}
+
 # Lineup Structure
 SLOTS: List[Dict] = [
     {"name": "PG", "allowed": {"PG"}},
@@ -257,6 +263,23 @@ def get_proj_cols(proj_source: str) -> List[str]:
         return ETR_PROJ_COLS
     else:
         raise ValueError("Invalid projection source.")
+
+
+def get_slates():
+    slates = []
+
+    for results_file in RESULTS_DIR.iterdir():
+        if not results_file.is_file():
+            continue
+
+        meta = parse_filename(results_file.stem)
+
+        if meta.sport != "nba":
+            continue
+
+        slates.append(meta)
+
+    return slates
 
 
 def lineup_df_to_player_keys(

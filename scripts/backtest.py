@@ -27,12 +27,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import beta
 from utils import (
-    BLEND_CANDIDATE_DIR,
-    ETR_CANDIDATE_DIR,
+    CANDIDATE_DIR_MAP,
     ETR_PROJ_DIR,
     H2H_DIR,
-    RESULTS_DIR,
-    RG_CANDIDATE_DIR,
     RG_PROJ_DIR,
     SLOT_ORDER,
     SLOTS,
@@ -40,11 +37,11 @@ from utils import (
     SlateMeta,
     adjusted_score,
     blend_projections,
+    get_slates,
     load_dk_salaries_csv,
     load_projections,
     load_results_csv,
     normalize_name,
-    parse_filename,
     total_fragile_minutes,
 )
 
@@ -340,13 +337,8 @@ def load_candidate_lineups(
     dk_salaries: pd.DataFrame,
     use_late_swaps: bool,
 ) -> Tuple[List[Lineup], List[Lineup], List[Lineup]]:
-    candidate_dirs = {
-        "blend": BLEND_CANDIDATE_DIR,
-        "etr": ETR_CANDIDATE_DIR,
-        "rg": RG_CANDIDATE_DIR,
-    }
     candidate_lineups_path = (
-        candidate_dirs[proj_source]
+        CANDIDATE_DIR_MAP[proj_source]
         / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
     )
 
@@ -355,26 +347,26 @@ def load_candidate_lineups(
             dk_salaries.set_index("player_key")["game_time_local"].unique()
         )
         candidate_lineups_path = (
-            candidate_dirs[proj_source]
+            CANDIDATE_DIR_MAP[proj_source]
             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}T{game_times[-1].strftime('%H%M')}.json"
         )
 
     with open(candidate_lineups_path, "r") as f:
         payload = json.load(f)
 
-    required = {"slate_id", "top_fpts", "top_minutes", "top_adjusted"}
+    required = {"slate_id", "max_fpts", "max_minutes", "max_fpts_minutes_floor"}
     missing = required - payload.keys()
     if missing:
         raise ValueError(f"Candidate lineup file missing keys: {missing}")
 
-    n_lineups = 10
+    n_lineups = 1
 
-    top_fpts_keys = payload["top_fpts"][:n_lineups]
-    top_minutes_keys = payload["top_minutes"][:n_lineups]
-    top_fpts_minutes_floor_keys = payload["top_adjusted"][:n_lineups]
+    max_fpts_keys = payload["max_fpts"][:n_lineups]
+    max_minutes_keys = payload["max_minutes"][:n_lineups]
+    max_fpts_minutes_floor_keys = payload["max_fpts_minutes_floor"][:n_lineups]
 
     for i, lineups in enumerate(
-        [top_fpts_keys, top_minutes_keys, top_fpts_minutes_floor_keys]
+        [max_fpts_keys, max_minutes_keys, max_fpts_minutes_floor_keys]
     ):
         for lineup in lineups:
             lineup_df = lineup_from_keys(lineup, dk_salaries)
@@ -386,21 +378,21 @@ def load_candidate_lineups(
                 for error in errors:
                     logging.error(error)
 
-    top_fpts_lineups = [
-        lineup_from_player_keys(proj, player_keys) for player_keys in top_fpts_keys
+    max_fpts_lineups = [
+        lineup_from_player_keys(proj, player_keys) for player_keys in max_fpts_keys
     ]
-    top_minutes_lineups = [
-        lineup_from_player_keys(proj, player_keys) for player_keys in top_minutes_keys
+    max_minutes_lineups = [
+        lineup_from_player_keys(proj, player_keys) for player_keys in max_minutes_keys
     ]
-    top_fpts_minutes_floor_lineups = [
+    max_fpts_minutes_floor_lineups = [
         lineup_from_player_keys(proj, player_keys)
-        for player_keys in top_fpts_minutes_floor_keys
+        for player_keys in max_fpts_minutes_floor_keys
     ]
 
     return (
-        top_fpts_lineups,
-        top_minutes_lineups,
-        top_fpts_minutes_floor_lineups,
+        max_fpts_lineups,
+        max_minutes_lineups,
+        max_fpts_minutes_floor_lineups,
     )
 
 
@@ -886,24 +878,24 @@ def evaluate_h2h_lineups(
     max_fpts_wins_no_mirror = 0
 
     if proj_source.lower() == "blend":
-        top_fpts_lineups = top_lineups.blend_fpts
-        top_fpts_lineups_minutes_floor = top_lineups.blend_fpts_minutes_floor
+        max_fpts_lineups = top_lineups.blend_fpts
+        max_fpts_lineups_minutes_floor = top_lineups.blend_fpts_minutes_floor
     elif proj_source.lower() == "etr":
-        top_fpts_lineups = top_lineups.etr_fpts
-        top_fpts_lineups_minutes_floor = top_lineups.etr_fpts_minutes_floor
+        max_fpts_lineups = top_lineups.etr_fpts
+        max_fpts_lineups_minutes_floor = top_lineups.etr_fpts_minutes_floor
     elif proj_source.lower() == "rg":
-        top_fpts_lineups = top_lineups.rg_fpts
-        top_fpts_lineups_minutes_floor = top_lineups.rg_fpts_minutes_floor
+        max_fpts_lineups = top_lineups.rg_fpts
+        max_fpts_lineups_minutes_floor = top_lineups.rg_fpts_minutes_floor
     else:
         raise ValueError(f"Invalid projection source {proj_source}")
 
-    top_10_fpts_lineups = top_fpts_lineups[:10]
+    top_10_fpts_lineups = max_fpts_lineups[:10]
     actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
     top_10_median_actual = actual_scores[len(actual_scores) // 2]
 
-    adjusted_fragile_minutes_floor_lineup = top_fpts_lineups_minutes_floor[0]
+    adjusted_fragile_minutes_floor_lineup = max_fpts_lineups_minutes_floor[0]
     adjusted_fragile_lineup = sorted(
-        top_fpts_lineups,
+        max_fpts_lineups,
         key=lambda lu: adjusted_score(
             lu.projected_fpts,
             lu.projected_minutes,
@@ -1226,9 +1218,7 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
                 slate_filter, AggregateStrategyMetrics()
             )
             for allow_mirrors in [True, False]:
-                filter_win_rate = (
-                    "win_rate" if allow_mirrors else "win_rate_no_mirror"
-                )
+                filter_win_rate = "win_rate" if allow_mirrors else "win_rate_no_mirror"
                 val_win_rate = getattr(strategy_src, filter_win_rate)
                 if val_win_rate is not None:
                     setattr(
@@ -1239,9 +1229,7 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
                     n_slates = "n_slates" if allow_mirrors else "n_slates_no_mirror"
                     setattr(slate_dest, n_slates, getattr(slate_dest, n_slates) + 1)
 
-                filter_winnings = (
-                    "winnings" if allow_mirrors else "winnings_no_mirror"
-                )
+                filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
                 val_winnings = getattr(strategy_src, filter_winnings)
                 if val_winnings is not None:
                     setattr(
@@ -1299,7 +1287,7 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
 
 def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
     """
-    Example backtest workflow. `top_fpts_indices` and `top_minutes_indices` are lists of
+    Example backtest workflow. `max_fpts_indices` and `max_minutes_indices` are lists of
     lineups represented by player indices into the projection dataframe.
     """
     meta = SlateMeta(
@@ -1400,19 +1388,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    slates = []
-
-    for results_file in RESULTS_DIR.iterdir():
-        if not results_file.is_file():
-            continue
-
-        meta = parse_filename(results_file.stem)
-
-        if meta.sport != "nba":
-            continue
-
-        slates.append(meta)
-
+    slates = get_slates()
     n_slates = len(slates)
 
     slates.sort(key=lambda x: x.datetime)
