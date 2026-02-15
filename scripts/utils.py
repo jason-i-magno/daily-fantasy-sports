@@ -70,6 +70,16 @@ _SLATE_ID_RE = re.compile(
     re.VERBOSE,
 )
 
+_SUFFIX_RE = re.compile(
+    r"""
+    (?:,)?\s*                    # optional comma/space
+    (?:jr|sr|ii|iii|iv|v|vi|vii|viii|ix|x)  # suffixes
+    \.?                          # optional period
+    \s*$                         # end of string
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # Path Constants
 DATA_DIR = Path("data")
 
@@ -79,12 +89,13 @@ RAW_LINEUPS_DIR = DATA_DIR / "raw"
 
 BLEND_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "blend"
 BLEND_OUTPUT_DIR = PROCESSED_DIR / "blend"
+DK_HISTORY_DIR = RAW_LINEUPS_DIR / "dk_history"
 DK_SALARIES_DIR = RAW_LINEUPS_DIR / "draftkings"
 ETR_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "etr"
 ETR_OUTPUT_DIR = PROCESSED_DIR / "etr"
 ETR_PROJ_DIR = RAW_LINEUPS_DIR / "etr"
 H2H_DIR = PROCESSED_DIR / "h2h"
-RESULTS_DIR = RAW_LINEUPS_DIR / "history"
+NBA_BOX_SCORES_DIR = RAW_LINEUPS_DIR / "nba_box_scores"
 RG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "rotogrinders"
 RG_OUTPUT_DIR = PROCESSED_DIR / "rotogrinders"
 RG_PROJ_DIR = RAW_LINEUPS_DIR / "rotogrinders"
@@ -129,6 +140,24 @@ ETR_PROJ_COLS = [
     "ceiling",
     "team",
 ]
+
+# Candidate Types
+CANDIDATE_TYPES = [
+    "max_fpts",
+    "max_minutes",
+    "max_fpts_minutes_floor",
+    "max_fpts_force_top_proj_1",
+    "max_fpts_force_top_proj_2",
+    "max_fpts_force_top_proj_3",
+]
+
+# Aliases
+ALIASES = {
+    "Jimmy Butler III": "Jimmy Butler",
+    "GG Jackson": "Gregory Jackson",
+    "Alex Sarr": "Alexandre Sarr",
+    "Robert Williams III": "Robert Williams",
+}
 
 
 # ----------------------------
@@ -268,11 +297,11 @@ def get_proj_cols(proj_source: str) -> List[str]:
 def get_slates():
     slates = []
 
-    for results_file in RESULTS_DIR.iterdir():
-        if not results_file.is_file():
+    for dk_history_file in DK_HISTORY_DIR.iterdir():
+        if not dk_history_file.is_file():
             continue
 
-        meta = parse_filename(results_file.stem)
+        meta = parse_filename(dk_history_file.stem)
 
         if meta.sport != "nba":
             continue
@@ -482,16 +511,16 @@ def load_projections(
     return etr_proj, rg_proj, slate_games
 
 
-def load_results_csv(slate: ResultsFileMeta) -> pd.DataFrame:
+def load_dk_history_csv(slate: ResultsFileMeta) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load post-slate results. Expected columns: id_col, actual_fpts.
+    Load post-slate history. Expected columns: id_col, actual_fpts.
     """
-    results_path = (
-        RESULTS_DIR
-        / f"{slate.sport}_{slate.slate}_{slate.site}_results_{slate.datetime}.csv"
+    dk_history_path = (
+        DK_HISTORY_DIR
+        / f"{slate.sport}_{slate.slate}_{slate.site}_history_{slate.datetime}.csv"
     )
 
-    raw = pd.read_csv(results_path, dtype=str)
+    raw = pd.read_csv(dk_history_path, dtype=str)
 
     entries = []
     players = []
@@ -528,6 +557,11 @@ def load_results_csv(slate: ResultsFileMeta) -> pd.DataFrame:
     return entries_df, players_df
 
 
+def load_nba_box_scores_csv(date: str) -> pd.DataFrame:
+    nba_box_scores_path = NBA_BOX_SCORES_DIR / f"{date}_nba_box_scores.csv"
+    return pd.read_csv(nba_box_scores_path)
+
+
 def normalize_columns(
     df: pd.DataFrame, required: Iterable[str] | None = None
 ) -> pd.DataFrame:
@@ -554,7 +588,9 @@ def normalize_name(name: str) -> str:
     """Lowercase, strip, and remove punctuation/accents for simple matching."""
     if not isinstance(name, str):
         return ""
-    normalized = unicodedata.normalize("NFKD", name)
+
+    normalized = ALIASES.get(name, name)
+    normalized = unicodedata.normalize("NFKD", normalized)
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     normalized = normalized.lower()
     cleaned = "".join(ch for ch in normalized if ch.isalnum())

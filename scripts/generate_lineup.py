@@ -208,6 +208,7 @@ def build_ilp_with_slots(
     df: pd.DataFrame,
     strategy: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
+    n_force_top_projected: int = 0,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
@@ -316,9 +317,13 @@ def build_ilp_with_slots(
                     prob += y[(player_idx, other_s)] == 0
 
     # Force top projected scorer(s) into the lineup
-    # top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
-    # for top_fpts_id in top_fpts_ids:
-    #     prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
+    top_fpts_ids = (
+        df.sort_values("proj_fpts", ascending=False)
+        .head(n_force_top_projected)
+        .index.tolist()
+    )
+    for top_fpts_id in top_fpts_ids:
+        prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
 
     return prob, y
 
@@ -347,9 +352,13 @@ def solve_top_k_lineups(
     k: int = 10,
     strategy: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
+    n_force_top_projected: int = 0,
 ):
     prob, y = build_ilp_with_slots(
-        df, strategy=strategy, locked_assignments=locked_assignments
+        df,
+        strategy=strategy,
+        locked_assignments=locked_assignments,
+        n_force_top_projected=n_force_top_projected,
     )
 
     lineups = []
@@ -422,9 +431,15 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "-f",
-        "--filter-game_time",
+        "--filter-game-time",
         action="store_true",
         help="Load salaries/projections from the database instead of CSVs.",
+    )
+    parser.add_argument(
+        "-n",
+        "--n-force-top-projected",
+        default=0,
+        help="Top N projected players to force",
     )
     return parser.parse_args(argv)
 
@@ -437,6 +452,7 @@ def generate_lineups(
     locked_players: dict = {},
     game_time_filter: datetime = datetime.now(ZoneInfo("America/Denver")),
     use_db: bool = False,
+    n_force_top_projected: int = 0,
 ):
     meta = parse_slate_id(slate_id)
     if use_db:
@@ -521,6 +537,7 @@ def generate_lineups(
         k=k_lineups,
         strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
         locked_assignments=locked_assignments,
+        n_force_top_projected=n_force_top_projected,
     )
 
     if "adjusted" in strategy:
@@ -569,6 +586,7 @@ def main(argv: Iterable[str]) -> int:
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )[0]
 
     top_fpts_lineup = generate_lineups(
@@ -579,6 +597,7 @@ def main(argv: Iterable[str]) -> int:
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )[0]
 
     adjusted_lineups = generate_lineups(
@@ -589,6 +608,7 @@ def main(argv: Iterable[str]) -> int:
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )
 
     with open(args.output, "w") as out_file:

@@ -28,6 +28,7 @@ import pandas as pd
 from scipy.stats import beta
 from utils import (
     CANDIDATE_DIR_MAP,
+    CANDIDATE_TYPES,
     ETR_PROJ_DIR,
     H2H_DIR,
     RG_PROJ_DIR,
@@ -39,8 +40,8 @@ from utils import (
     blend_projections,
     get_slates,
     load_dk_salaries_csv,
+    load_nba_box_scores_csv,
     load_projections,
-    load_results_csv,
     normalize_name,
     total_fragile_minutes,
 )
@@ -226,16 +227,20 @@ class SlateResult:
 
 
 @dataclasses.dataclass
+class StrategyLineups:
+    max_fpts: List[Lineup] = dataclasses.field(default_factory=list)
+    max_minutes: List[Lineup] = dataclasses.field(default_factory=list)
+    max_fpts_minutes_floor: List[Lineup] = dataclasses.field(default_factory=list)
+    max_fpts_force_top_proj_1: List[Lineup] = dataclasses.field(default_factory=list)
+    max_fpts_force_top_proj_2: List[Lineup] = dataclasses.field(default_factory=list)
+    max_fpts_force_top_proj_3: List[Lineup] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
 class TopLineups:
-    blend_fpts: List[Lineup] = dataclasses.field(default_factory=list)
-    blend_minutes: List[Lineup] = dataclasses.field(default_factory=list)
-    blend_fpts_minutes_floor: List[Lineup] = dataclasses.field(default_factory=list)
-    etr_fpts: List[Lineup] = dataclasses.field(default_factory=list)
-    etr_minutes: List[Lineup] = dataclasses.field(default_factory=list)
-    etr_fpts_minutes_floor: List[Lineup] = dataclasses.field(default_factory=list)
-    rg_fpts: List[Lineup] = dataclasses.field(default_factory=list)
-    rg_minutes: List[Lineup] = dataclasses.field(default_factory=list)
-    rg_fpts_minutes_floor: List[Lineup] = dataclasses.field(default_factory=list)
+    blend: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
+    etr: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
+    rg: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
 
 
 # ----------------------------
@@ -260,11 +265,14 @@ def extract_game_id(game_info: str) -> str:
     return game_info.split()[0]
 
 
-def join_proj_results(proj: pd.DataFrame, results: pd.DataFrame) -> pd.DataFrame:
-    lookup = results.set_index("player_key")
+def join_proj_results(proj: pd.DataFrame, box_scores: pd.DataFrame) -> pd.DataFrame:
+    lookup = box_scores.set_index("player_key")
 
-    # Merge in FPTScolumn
-    proj["FPTS"] = proj["player_key"].map(lookup["FPTS"])
+    # Merge in FPTS column:
+    # Prefer DK history-derived fpts if present, else fall back to NBA-calculated fpts.
+    dk_fpts = proj["player_key"].map(lookup.get("dk_fpts_calc"))
+    nba_fpts = proj["player_key"].map(lookup.get("nba_fpts_calc"))
+    proj["FPTS"] = dk_fpts.where(~pd.isna(dk_fpts), nba_fpts)
 
     return proj
 
@@ -274,6 +282,9 @@ def lineup_from_keys(player_keys: list[str], dk_salaries: pd.DataFrame):
     Convert 8 player_keys into a DataFrame compatible with validate_lineup().
     Requires full_df to contain player metadata.
     """
+    if player_keys is None:
+        return None
+
     if len(player_keys) != 8:
         raise ValueError("Lineup must contain exactly 8 players.")
 
@@ -336,7 +347,7 @@ def load_candidate_lineups(
     proj: pd.DataFrame,
     dk_salaries: pd.DataFrame,
     use_late_swaps: bool,
-) -> Tuple[List[Lineup], List[Lineup], List[Lineup]]:
+) -> StrategyLineups:
     candidate_lineups_path = (
         CANDIDATE_DIR_MAP[proj_source]
         / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
@@ -354,67 +365,54 @@ def load_candidate_lineups(
     with open(candidate_lineups_path, "r") as f:
         payload = json.load(f)
 
-    required = {"slate_id", "max_fpts", "max_minutes", "max_fpts_minutes_floor"}
-    missing = required - payload.keys()
+    missing = CANDIDATE_TYPES - payload.keys()
     if missing:
         raise ValueError(f"Candidate lineup file missing keys: {missing}")
 
-    n_lineups = 1
+    n_lineups = 10
+    strategy_lineups = StrategyLineups()
 
-    max_fpts_keys = payload["max_fpts"][:n_lineups]
-    max_minutes_keys = payload["max_minutes"][:n_lineups]
-    max_fpts_minutes_floor_keys = payload["max_fpts_minutes_floor"][:n_lineups]
+    for candidate_type in CANDIDATE_TYPES:
+        lineups_keys = payload[candidate_type][:n_lineups]
 
-    for i, lineups in enumerate(
-        [max_fpts_keys, max_minutes_keys, max_fpts_minutes_floor_keys]
-    ):
-        for lineup in lineups:
-            lineup_df = lineup_from_keys(lineup, dk_salaries)
+        for lineup_keys in lineups_keys:
+            lineup_df = lineup_from_keys(lineup_keys, dk_salaries)
+
+            if lineup_df is None:
+                continue
+
             errors = validate_lineup(lineup_df, dk_salaries)
 
             if errors:
-                print(i, proj_source)
-                print(lineup)
+                print(candidate_type, proj_source)
+                print(lineup_keys)
                 for error in errors:
                     logging.error(error)
+        setattr(
+            strategy_lineups,
+            candidate_type,
+            [
+                lineup_from_player_keys(proj, lineup_keys)
+                for lineup_keys in lineups_keys
+            ],
+        )
 
-    max_fpts_lineups = [
-        lineup_from_player_keys(proj, player_keys) for player_keys in max_fpts_keys
-    ]
-    max_minutes_lineups = [
-        lineup_from_player_keys(proj, player_keys) for player_keys in max_minutes_keys
-    ]
-    max_fpts_minutes_floor_lineups = [
-        lineup_from_player_keys(proj, player_keys)
-        for player_keys in max_fpts_minutes_floor_keys
-    ]
-
-    return (
-        max_fpts_lineups,
-        max_minutes_lineups,
-        max_fpts_minutes_floor_lineups,
-    )
+    return strategy_lineups
 
 
 def load_candidates(
     meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries, use_late_swaps
 ) -> TopLineups:
     lineups = TopLineups()
-    (
-        lineups.rg_fpts,
-        lineups.rg_minutes,
-        lineups.rg_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries, use_late_swaps)
-    (
-        lineups.etr_fpts,
-        lineups.etr_minutes,
-        lineups.etr_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries, use_late_swaps)
-    (
-        lineups.blend_fpts,
-        lineups.blend_minutes,
-        lineups.blend_fpts_minutes_floor,
-    ) = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries, use_late_swaps)
+    lineups.rg = load_candidate_lineups(
+        meta, "rg", rg_proj, dk_salaries, use_late_swaps
+    )
+    lineups.etr = load_candidate_lineups(
+        meta, "etr", etr_proj, dk_salaries, use_late_swaps
+    )
+    lineups.blend = load_candidate_lineups(
+        meta, "blend", blend_proj, dk_salaries, use_late_swaps
+    )
 
     return lineups
 
@@ -422,6 +420,9 @@ def load_candidates(
 def lineup_from_player_keys(
     df: pd.DataFrame, player_keys: Set[str], id_col: str = "player_key"
 ) -> Lineup:
+    if player_keys is None:
+        return None
+
     player_keys = set(player_keys)
     df = df.copy()
     df[id_col] = df[id_col].map(normalize_name)
@@ -865,7 +866,6 @@ def evaluate_h2h_lineups(
     slate_id: str,
     slate_games: int,
     top_lineups: TopLineups,
-    baseline_proj: Lineup,
     h2h_results: H2HResults,
     proj_source: str,
 ) -> List[ContestResult]:
@@ -877,17 +877,9 @@ def evaluate_h2h_lineups(
     max_fpts_wins = 0
     max_fpts_wins_no_mirror = 0
 
-    if proj_source.lower() == "blend":
-        max_fpts_lineups = top_lineups.blend_fpts
-        max_fpts_lineups_minutes_floor = top_lineups.blend_fpts_minutes_floor
-    elif proj_source.lower() == "etr":
-        max_fpts_lineups = top_lineups.etr_fpts
-        max_fpts_lineups_minutes_floor = top_lineups.etr_fpts_minutes_floor
-    elif proj_source.lower() == "rg":
-        max_fpts_lineups = top_lineups.rg_fpts
-        max_fpts_lineups_minutes_floor = top_lineups.rg_fpts_minutes_floor
-    else:
-        raise ValueError(f"Invalid projection source {proj_source}")
+    strategy_top_lineups = getattr(top_lineups, proj_source.lower())
+    max_fpts_lineups = strategy_top_lineups.max_fpts
+    max_fpts_lineups_minutes_floor = strategy_top_lineups.max_fpts_minutes_floor
 
     top_10_fpts_lineups = max_fpts_lineups[:10]
     actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
@@ -905,18 +897,18 @@ def evaluate_h2h_lineups(
         reverse=True,
     )[0]
 
-    for strategy in STRATEGIES:
-        my_lineup = None
-        no_mirror_count = 0
+    strategy_lineup_map = {
+        "adjusted_fragile_minutes_floor": adjusted_fragile_minutes_floor_lineup,
+        "adjusted_fragile": adjusted_fragile_lineup,
+        "max_fpts": max_fpts_lineups[0],
+        "max_fpts_force_top_proj_1": strategy_top_lineups.max_fpts_force_top_proj_1[0],
+        "max_fpts_force_top_proj_2": strategy_top_lineups.max_fpts_force_top_proj_2[0],
+        "max_fpts_force_top_proj_3": strategy_top_lineups.max_fpts_force_top_proj_3[0],
+    }
 
-        if strategy == "max_fpts":
-            my_lineup = baseline_proj
-        elif strategy == "adjusted_fragile":
-            my_lineup = adjusted_fragile_lineup
-        elif strategy == "adjusted_fragile_minutes_floor":
-            my_lineup = adjusted_fragile_minutes_floor_lineup
-        else:
-            raise ValueError("Invalid strategy")
+    for strategy in STRATEGIES:
+        my_lineup = strategy_lineup_map[strategy]
+        no_mirror_count = 0
 
         for fee in range(1, 4):
             contest_result, _ = evaluate_contest(
@@ -926,7 +918,6 @@ def evaluate_h2h_lineups(
                 slate_id,
                 slate_games,
                 f"{proj_source} H2H ${fee} {strategy}",
-                fee=fee,
                 opponent=getattr(h2h_results, f"opponent_{fee}"),
             )
 
@@ -1009,7 +1000,6 @@ def evaluate_contest(
     slate_id,
     slate_games,
     strategy,
-    fee=1,
     opponent="",
 ):
     win_vs_opponent = 0.0
@@ -1116,8 +1106,8 @@ def aggregate_slate_results(
 
     finalize(overall)
 
-    result = dict(bucketed)
-    # result = {}
+    # result = dict(bucketed)
+    result = {}
     result["overall"] = overall
     return result
 
@@ -1338,10 +1328,10 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
     slate_result.slate_games = slate_games
     blend_proj = blend_projections(rg_proj, etr_proj)
 
-    _, results_players_df = load_results_csv(slate)
-    rg_merged = join_proj_results(rg_proj, results_players_df)
-    etr_merged = join_proj_results(etr_proj, results_players_df)
-    blend_merged = join_proj_results(blend_proj, results_players_df)
+    box_scores_df = load_nba_box_scores_csv(slate.datetime)
+    rg_merged = join_proj_results(rg_proj, box_scores_df)
+    etr_merged = join_proj_results(etr_proj, box_scores_df)
+    blend_merged = join_proj_results(blend_proj, box_scores_df)
     top_lineups = load_candidates(
         meta,
         blend_merged,
@@ -1359,7 +1349,6 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
-        baseline_proj=top_lineups.rg_fpts[0],
         h2h_results=h2h_results,
         proj_source="RG",
     )
@@ -1368,7 +1357,6 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
-        baseline_proj=top_lineups.etr_fpts[0],
         h2h_results=h2h_results,
         proj_source="ETR",
     )
@@ -1377,7 +1365,6 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
-        baseline_proj=top_lineups.blend_fpts[0],
         h2h_results=h2h_results,
         proj_source="BLEND",
     )

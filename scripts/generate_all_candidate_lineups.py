@@ -11,6 +11,7 @@ from scripts.generate_lineup import (
 )
 from scripts.utils import (
     CANDIDATE_DIR_MAP,
+    CANDIDATE_TYPES,
     ETR_PROJ_DIR,
     MT,
     RG_PROJ_DIR,
@@ -196,8 +197,7 @@ def main(argv: Iterable[str]) -> int:
                 logging.info(f"Missing RG projections {rg_proj_path.name}")
                 break
 
-            # for proj_source in ["blend", "etr", "rg"]:
-            for proj_source in ["blend"]:
+            for proj_source in ["blend", "etr", "rg"]:
                 candidates_path = (
                     CANDIDATE_DIR_MAP[proj_source]
                     / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
@@ -216,9 +216,9 @@ def main(argv: Iterable[str]) -> int:
                         proj_source=proj_source,
                     )
 
-                for strategy in ["max_fpts", "max_minutes", "max_fpts_minutes_floor"]:
+                for strategy in CANDIDATE_TYPES:
                     # generate_candidates = True if game_time_idx > 0 else False
-                    generate_candidates = True
+                    generate_candidates = False
 
                     with open(candidates_path, "r") as f:
                         data = json.load(f)
@@ -266,6 +266,10 @@ def main(argv: Iterable[str]) -> int:
 
                         start_time = time.perf_counter()
 
+                        n_force_top_projected = 0
+                        if "force_top_proj" in strategy:
+                            n_force_top_projected = int(strategy[-1])
+
                         strategy_lineups = generate_lineups(
                             slate_id=meta.id,
                             projection_source=proj_source,
@@ -274,6 +278,7 @@ def main(argv: Iterable[str]) -> int:
                             locked_players=locked_players,
                             game_time_filter=game_time_filter,
                             use_db=False,
+                            n_force_top_projected=n_force_top_projected,
                         )
 
                         end_time = time.perf_counter()

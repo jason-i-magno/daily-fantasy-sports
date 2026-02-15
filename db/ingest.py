@@ -4,7 +4,7 @@ Ingest players from historical NBA DK results into the player table.
 
 For each CSV in data/raw/history with 'nba' in the filename:
 - Parse metadata from filename (sport, slate, site, date).
-- Load results using scripts.utils.load_results_csv (handles column parsing).
+- Load results using scripts.utils.load_dk_history_csv (handles column parsing).
 - Normalize player names with scripts.utils.normalize_name.
 - Insert unique player keys into the player table (ignore existing).
 """
@@ -29,13 +29,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from db.models import Contest, Player, Projection, Salary, Source  # noqa: E402
 from db.session import SessionLocal  # noqa: E402
 from scripts.utils import (  # noqa: E402
+    DK_HISTORY_DIR,
     ETR_PROJ_DIR,
     MT,
-    RESULTS_DIR,
     RG_PROJ_DIR,
+    load_dk_history_csv,
     load_dk_salaries_csv,
     load_projection_csv,
-    load_results_csv,
     normalize_name,
     parse_filename,
     parse_game_time,
@@ -45,14 +45,14 @@ from scripts.utils import (  # noqa: E402
 def collect_player_keys() -> Set[str]:
     """Scan history CSVs and collect normalized player keys."""
     player_keys: Set[str] = set()
-    for results_file in RESULTS_DIR.iterdir():
+    for results_file in DK_HISTORY_DIR.iterdir():
         if not results_file.is_file():
             continue
         if "nba" not in results_file.name.lower():
             continue
         meta = parse_filename(results_file.stem)
-        # load_results_csv expects ResultsFileMeta and reads from RESULTS_DIR
-        _, players_df = load_results_csv(meta)
+        # load_dk_history_csv expects ResultsFileMeta and reads from DK_HISTORY_DIR
+        _, players_df = load_dk_history_csv(meta)
         if players_df.empty:
             continue
         for name in players_df["Player"]:
@@ -264,7 +264,7 @@ def ingest_salaries(session, contest_id: int, salaries_df: pd.DataFrame) -> int:
 
 def ingest_contests(session) -> int:
     inserted = 0
-    for results_file in RESULTS_DIR.iterdir():
+    for results_file in DK_HISTORY_DIR.iterdir():
         if not results_file.is_file() or "nba" not in results_file.name.lower():
             continue
         meta = parse_filename(results_file.stem)
