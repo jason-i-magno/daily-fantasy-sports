@@ -209,6 +209,7 @@ def build_ilp_with_slots(
     strategy: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
@@ -241,14 +242,25 @@ def build_ilp_with_slots(
 
     # Salary cap
     salary_cap = 50000
-    prob += (
-        pulp.lpSum(
-            df.loc[i, "salary"] * y[(i, s)]
-            for i in range(n_players)
-            for s in range(n_slots)
+
+    if force_sal_50000:
+        prob += (
+            pulp.lpSum(
+                df.loc[i, "salary"] * y[(i, s)]
+                for i in range(n_players)
+                for s in range(n_slots)
+            )
+            == salary_cap
         )
-        <= salary_cap
-    )
+    else:
+        prob += (
+            pulp.lpSum(
+                df.loc[i, "salary"] * y[(i, s)]
+                for i in range(n_players)
+                for s in range(n_slots)
+            )
+            <= salary_cap
+        )
 
     # Each slot filled once
     for s in range(n_slots):
@@ -353,12 +365,14 @@ def solve_top_k_lineups(
     strategy: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
 ):
     prob, y = build_ilp_with_slots(
         df,
         strategy=strategy,
         locked_assignments=locked_assignments,
         n_force_top_projected=n_force_top_projected,
+        force_sal_50000=force_sal_50000,
     )
 
     lineups = []
@@ -453,6 +467,7 @@ def generate_lineups(
     game_time_filter: datetime = datetime.now(ZoneInfo("America/Denver")),
     use_db: bool = False,
     n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
 ):
     meta = parse_slate_id(slate_id)
     if use_db:
@@ -531,16 +546,17 @@ def generate_lineups(
             ] = slot_index[position]
 
     # Generate top k lineups
-    lineups = solve_top_k_lineups(
-        working_df,
-        proj_source=projection_source,
-        k=k_lineups,
-        strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
-        locked_assignments=locked_assignments,
-        n_force_top_projected=n_force_top_projected,
-    )
-
     if "adjusted" in strategy:
+        lineups = solve_top_k_lineups(
+            working_df,
+            proj_source=projection_source,
+            k=10,
+            strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
+            locked_assignments=locked_assignments,
+            n_force_top_projected=n_force_top_projected,
+            force_sal_50000=force_sal_50000,
+        )
+
         for lu in lineups:
             tfm = total_fragile_minutes(lu["lineup"])
             lu["total_fragile_minutes"] = tfm
@@ -552,7 +568,18 @@ def generate_lineups(
                 slate_games,
             )
 
-        lineups = sorted(lineups, key=lambda x: x["adjusted_score"], reverse=True)
+        lineups = [sorted(lineups, key=lambda x: x["adjusted_score"], reverse=True)[0]]
+
+    else:
+        lineups = solve_top_k_lineups(
+            working_df,
+            proj_source=projection_source,
+            k=1,
+            strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
+            locked_assignments=locked_assignments,
+            n_force_top_projected=n_force_top_projected,
+            force_sal_50000=force_sal_50000,
+        )
 
     return lineups
 

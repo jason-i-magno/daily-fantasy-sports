@@ -28,15 +28,14 @@ import pandas as pd
 from scipy.stats import beta
 from utils import (
     CANDIDATE_DIR_MAP,
-    CANDIDATE_TYPES,
     ETR_PROJ_DIR,
     H2H_DIR,
     RG_PROJ_DIR,
     SLOT_ORDER,
     SLOTS,
+    STRATEGIES,
     ResultsFileMeta,
     SlateMeta,
-    adjusted_score,
     blend_projections,
     get_slates,
     load_dk_salaries_csv,
@@ -66,13 +65,6 @@ FILTER_TYPES = [
     "fee_1",
     "fee_2",
     "fee_3",
-]
-
-
-STRATEGIES = [
-    "adjusted_fragile_minutes_floor",
-    "adjusted_fragile",
-    "max_fpts",
 ]
 
 
@@ -125,7 +117,28 @@ class AggregateLineupMetrics:
     adjusted_fragile: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
+    max_minutes: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
     max_fpts: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_adjusted_fragile: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_minutes_floor: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_force_top_proj_1: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_force_top_proj_2: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_force_top_proj_3: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
 
@@ -153,8 +166,6 @@ class ContestResult:
     win: float
     margin: float
     is_mirror: bool
-    win_median: float
-    margin_median: float
     opponent: str
 
 
@@ -201,7 +212,26 @@ class LineupResult:
         default_factory=StrategyResult
     )
     adjusted_fragile: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_minutes: StrategyResult = dataclasses.field(default_factory=StrategyResult)
     max_fpts: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_fpts_adjusted_fragile: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_minutes_floor: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_force_top_proj_1: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_force_top_proj_2: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_force_top_proj_3: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
 
 
 @dataclasses.dataclass
@@ -365,14 +395,14 @@ def load_candidate_lineups(
     with open(candidate_lineups_path, "r") as f:
         payload = json.load(f)
 
-    missing = CANDIDATE_TYPES - payload.keys()
+    missing = STRATEGIES - payload.keys()
     if missing:
         raise ValueError(f"Candidate lineup file missing keys: {missing}")
 
-    n_lineups = 10
+    n_lineups = 1
     strategy_lineups = StrategyLineups()
 
-    for candidate_type in CANDIDATE_TYPES:
+    for candidate_type in STRATEGIES:
         lineups_keys = payload[candidate_type][:n_lineups]
 
         for lineup_keys in lineups_keys:
@@ -870,51 +900,44 @@ def evaluate_h2h_lineups(
     proj_source: str,
 ) -> List[ContestResult]:
     lineup_result = LineupResult()
-    adjusted_fragile_minutes_floor_wins = 0
-    adjusted_fragile_minutes_floor_wins_no_mirror = 0
-    adjusted_fragile_wins = 0
-    adjusted_fragile_wins_no_mirror = 0
-    max_fpts_wins = 0
-    max_fpts_wins_no_mirror = 0
 
     strategy_top_lineups = getattr(top_lineups, proj_source.lower())
-    max_fpts_lineups = strategy_top_lineups.max_fpts
-    max_fpts_lineups_minutes_floor = strategy_top_lineups.max_fpts_minutes_floor
-
-    top_10_fpts_lineups = max_fpts_lineups[:10]
-    actual_scores = sorted(lu.actual_fpts for lu in top_10_fpts_lineups)
-    top_10_median_actual = actual_scores[len(actual_scores) // 2]
-
-    adjusted_fragile_minutes_floor_lineup = max_fpts_lineups_minutes_floor[0]
-    adjusted_fragile_lineup = sorted(
-        max_fpts_lineups,
-        key=lambda lu: adjusted_score(
-            lu.projected_fpts,
-            lu.projected_minutes,
-            lu.total_fragile_minutes,
-            slate_games,
-        ),
-        reverse=True,
-    )[0]
 
     strategy_lineup_map = {
-        "adjusted_fragile_minutes_floor": adjusted_fragile_minutes_floor_lineup,
-        "adjusted_fragile": adjusted_fragile_lineup,
-        "max_fpts": max_fpts_lineups[0],
+        "max_minutes": strategy_top_lineups.max_minutes[0],
+        "max_fpts": strategy_top_lineups.max_fpts[0],
+        "max_fpts_minutes_floor": strategy_top_lineups.max_fpts_minutes_floor[0],
         "max_fpts_force_top_proj_1": strategy_top_lineups.max_fpts_force_top_proj_1[0],
         "max_fpts_force_top_proj_2": strategy_top_lineups.max_fpts_force_top_proj_2[0],
         "max_fpts_force_top_proj_3": strategy_top_lineups.max_fpts_force_top_proj_3[0],
+        "max_fpts_force_sal_50000": strategy_top_lineups.max_fpts_force_sal_50000[0],
+        "max_fpts_adjusted_fragile": strategy_top_lineups.max_fpts_adjusted_fragile[0],
     }
 
     for strategy in STRATEGIES:
+        if strategy not in strategy_lineup_map:
+            raise ValueError(f"Strategy '{strategy}' missing from strategy_lineup_map")
+        if not hasattr(lineup_result, strategy):
+            raise ValueError(
+                f"Strategy '{strategy}' missing from LineupResult/aggregate definitions"
+            )
+
+    wins = {s: 0.0 for s in STRATEGIES}
+    wins_no_mirror = {s: 0.0 for s in STRATEGIES}
+    no_mirror_counts = {s: 0 for s in STRATEGIES}
+
+    for strategy in STRATEGIES:
         my_lineup = strategy_lineup_map[strategy]
-        no_mirror_count = 0
+
+        if my_lineup is None:
+            continue
+
+        strategy_result = getattr(lineup_result, strategy)
 
         for fee in range(1, 4):
             contest_result, _ = evaluate_contest(
                 my_lineup,
                 getattr(h2h_results, f"lineup_{fee}"),
-                top_10_median_actual,
                 slate_id,
                 slate_games,
                 f"{proj_source} H2H ${fee} {strategy}",
@@ -925,70 +948,28 @@ def evaluate_h2h_lineups(
                 fee, contest_result.win, contest_result.is_mirror
             )
 
-            strategy_result = getattr(lineup_result, strategy)
             strategy_result.win_rate_by_fee[fee] = contest_result.win
             strategy_result.winnings_by_fee[fee] = winnings
+            wins[strategy] += contest_result.win
+            strategy_result.winnings += winnings
 
             if not contest_result.is_mirror:
                 strategy_result.win_rate_no_mirror_by_fee[fee] = contest_result.win
                 strategy_result.winnings_no_mirror_by_fee[fee] = winnings
+                wins_no_mirror[strategy] += contest_result.win
+                no_mirror_counts[strategy] += 1
+                if strategy_result.winnings_no_mirror is None:
+                    strategy_result.winnings_no_mirror = winnings
+                else:
+                    strategy_result.winnings_no_mirror += winnings
 
-            if strategy == "max_fpts":
-                max_fpts_wins += contest_result.win
-                lineup_result.max_fpts.winnings += winnings
+        if no_mirror_counts[strategy] > 0:
+            strategy_result.win_rate_no_mirror = (
+                wins_no_mirror[strategy] / no_mirror_counts[strategy]
+            )
 
-                if not contest_result.is_mirror:
-                    if lineup_result.max_fpts.winnings_no_mirror is not None:
-                        lineup_result.max_fpts.winnings_no_mirror += winnings
-                    else:
-                        lineup_result.max_fpts.winnings_no_mirror = winnings
-                    max_fpts_wins_no_mirror += contest_result.win
-                    no_mirror_count += 1
-            elif strategy == "adjusted_fragile":
-                adjusted_fragile_wins += contest_result.win
-                lineup_result.adjusted_fragile.winnings += winnings
-
-                if not contest_result.is_mirror:
-                    if lineup_result.adjusted_fragile.winnings_no_mirror is not None:
-                        lineup_result.adjusted_fragile.winnings_no_mirror += winnings
-                    else:
-                        lineup_result.adjusted_fragile.winnings_no_mirror = winnings
-                    adjusted_fragile_wins_no_mirror += contest_result.win
-                    no_mirror_count += 1
-            elif strategy == "adjusted_fragile_minutes_floor":
-                adjusted_fragile_minutes_floor_wins += contest_result.win
-                lineup_result.adjusted_fragile_minutes_floor.winnings += winnings
-
-                if not contest_result.is_mirror:
-                    if (
-                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror
-                        is not None
-                    ):
-                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror += winnings
-                    else:
-                        lineup_result.adjusted_fragile_minutes_floor.winnings_no_mirror = winnings
-                    adjusted_fragile_minutes_floor_wins_no_mirror += contest_result.win
-                    no_mirror_count += 1
-
-        if no_mirror_count > 0:
-            if strategy == "max_fpts":
-                lineup_result.max_fpts.win_rate_no_mirror = (
-                    max_fpts_wins_no_mirror / no_mirror_count
-                )
-            elif strategy == "adjusted_fragile":
-                lineup_result.adjusted_fragile.win_rate_no_mirror = (
-                    adjusted_fragile_wins_no_mirror / no_mirror_count
-                )
-            elif strategy == "adjusted_fragile_minutes_floor":
-                lineup_result.adjusted_fragile_minutes_floor.win_rate_no_mirror = (
-                    adjusted_fragile_minutes_floor_wins_no_mirror / no_mirror_count
-                )
-
-    lineup_result.adjusted_fragile_minutes_floor.win_rate = (
-        adjusted_fragile_minutes_floor_wins / 3
-    )
-    lineup_result.adjusted_fragile.win_rate = adjusted_fragile_wins / 3
-    lineup_result.max_fpts.win_rate = max_fpts_wins / 3
+    for strategy in STRATEGIES:
+        getattr(lineup_result, strategy).win_rate = wins[strategy] / 3
 
     return lineup_result
 
@@ -996,7 +977,6 @@ def evaluate_h2h_lineups(
 def evaluate_contest(
     my_lineup,
     opponent_lineup,
-    top_10_median_actual,
     slate_id,
     slate_games,
     strategy,
@@ -1013,15 +993,6 @@ def evaluate_contest(
         win_vs_opponent = 0.0  # loss
     else:
         win_vs_opponent = 0.5  # tie (rare with different lineups)
-
-    win_vs_top_10_median = 0.0
-
-    if my_lineup.actual_fpts > top_10_median_actual:
-        win_vs_top_10_median = 1.0  # win
-    elif my_lineup.actual_fpts < top_10_median_actual:
-        win_vs_top_10_median = 0.0  # loss
-    else:
-        win_vs_top_10_median = 0.5  # tie (rare with different lineups)
 
     opponent_result = OpponentResult(
         slate_id=slate_id,
@@ -1042,8 +1013,6 @@ def evaluate_contest(
         win=win_vs_opponent,
         margin=my_lineup.actual_fpts - opponent_lineup.actual_fpts,
         is_mirror=is_mirror,
-        win_median=win_vs_top_10_median,
-        margin_median=my_lineup.actual_fpts - top_10_median_actual,
         opponent=opponent,
     )
 
@@ -1051,11 +1020,13 @@ def evaluate_contest(
 
 
 def slate_bucket(games: int) -> str:
-    if games <= 4:
-        return "2-4"
-    if games <= 8:
-        return "5-8"
-    return "9+"
+    # if games <= 4:
+    #     return "2-4"
+    # if games <= 8:
+    #     return "5-8"
+    # return "9+"
+
+    return str(games)
 
 
 def aggregate_slate_results(
@@ -1391,7 +1362,7 @@ if __name__ == "__main__":
 
     aggregate = aggregate_slate_results(slate_results)
     slate_values = collect_slate_values(slate_results)
-    print_evaluation(aggregate, slate_values)
+    # print_evaluation(aggregate, slate_values)
     eval_df = evaluation_to_df(aggregate, slate_values)
     out_path = Path("data/processed/backtest_eval.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)

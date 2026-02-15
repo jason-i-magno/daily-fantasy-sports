@@ -11,11 +11,11 @@ from scripts.generate_lineup import (
 )
 from scripts.utils import (
     CANDIDATE_DIR_MAP,
-    CANDIDATE_TYPES,
     ETR_PROJ_DIR,
     MT,
     RG_PROJ_DIR,
     SLOT_ORDER,
+    STRATEGIES,
     ResultsFileMeta,
     SlateMeta,
     get_slates,
@@ -216,7 +216,7 @@ def main(argv: Iterable[str]) -> int:
                         proj_source=proj_source,
                     )
 
-                for strategy in CANDIDATE_TYPES:
+                for strategy in STRATEGIES:
                     # generate_candidates = True if game_time_idx > 0 else False
                     generate_candidates = False
 
@@ -270,6 +270,10 @@ def main(argv: Iterable[str]) -> int:
                         if "force_top_proj" in strategy:
                             n_force_top_projected = int(strategy[-1])
 
+                        force_sal_50000 = False
+                        if "force_sal_50000" in strategy:
+                            force_sal_50000 = True
+
                         strategy_lineups = generate_lineups(
                             slate_id=meta.id,
                             projection_source=proj_source,
@@ -279,6 +283,7 @@ def main(argv: Iterable[str]) -> int:
                             game_time_filter=game_time_filter,
                             use_db=False,
                             n_force_top_projected=n_force_top_projected,
+                            force_sal_50000=force_sal_50000,
                         )
 
                         end_time = time.perf_counter()

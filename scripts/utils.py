@@ -141,14 +141,16 @@ ETR_PROJ_COLS = [
     "team",
 ]
 
-# Candidate Types
-CANDIDATE_TYPES = [
-    "max_fpts",
+# STRATEGIES
+STRATEGIES = [
     "max_minutes",
+    "max_fpts",
+    "max_fpts_adjusted_fragile",
     "max_fpts_minutes_floor",
     "max_fpts_force_top_proj_1",
     "max_fpts_force_top_proj_2",
     "max_fpts_force_top_proj_3",
+    "max_fpts_force_sal_50000",
 ]
 
 # Aliases
