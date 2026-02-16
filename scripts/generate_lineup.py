@@ -24,11 +24,11 @@ from db.session import SessionLocal
 from scripts.utils import (
     ET,
     MT,
+    PROJ_COLS,
     SLOT_ORDER,
     SLOTS,
     adjusted_score,
     blend_projections,
-    get_proj_cols,
     load_dk_salaries_csv,
     load_projections,
     parse_positions,
@@ -142,10 +142,10 @@ def load_from_db(meta, projection_source: str):
         proj_df["salary"] = proj_df["player_key"].map(lookup["salary"])
         proj_df["positions"] = proj_df["player_key"].map(lookup["positions"])
         proj_df["team"] = proj_df["player_key"].map(lookup["team"])
-        if "ceiling" not in proj_df:
-            proj_df["ceiling"] = 0.0
-        if "floor" not in proj_df:
-            proj_df["floor"] = 0.0
+        if "proj_ceil" not in proj_df:
+            proj_df["proj_ceil"] = 0.0
+        if "proj_floor" not in proj_df:
+            proj_df["proj_floor"] = 0.0
         return proj_df
 
     rg_df = attach_meta(rg_df)
@@ -170,19 +170,18 @@ def load_from_db(meta, projection_source: str):
 def write_lineup(
     lineup: pd.DataFrame, proj_source: str, out_file: io.TextIOWrapper
 ) -> None:
-    cols = get_proj_cols(proj_source)
-
     lineup = lineup.copy()
     lineup["slot"] = pd.Categorical(lineup["slot"], categories=SLOT_ORDER, ordered=True)
     sorted_lineup = lineup.sort_values("slot")
 
-    out_file.write(sorted_lineup[["slot"] + cols].to_string(index=False))
+    out_file.write(sorted_lineup[["slot"] + PROJ_COLS].to_string(index=False))
     totals = {
         "total_salary": lineup["salary"].sum(),
         "total_proj_minutes": lineup["proj_minutes"].sum(),
         "total_proj_fpts": lineup["proj_fpts"].sum(),
-        "total_ceiling": lineup["ceiling"].sum(),
-    } | {"total_floor": lineup["floor"].sum() if "floor" in cols else 0.0}
+        "total_proj_ceil": lineup["proj_ceil"].sum(),
+        "total_floor": lineup["proj_floor"].sum(),
+    }
 
     out_file.write("\nTotals:")
     for k, v in totals.items():
@@ -206,7 +205,7 @@ slot_index = {
 
 def build_ilp_with_slots(
     df: pd.DataFrame,
-    strategy: str = "max_fpts",
+    optimizer_objective: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
     force_sal_50000: bool = False,
@@ -223,22 +222,32 @@ def build_ilp_with_slots(
     }
 
     # Objective
-    if strategy == "max_fpts":
-        # Maximize fpts
+    if optimizer_objective == "max_fpts":
         prob += pulp.lpSum(
             df.loc[i, "proj_fpts"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
-    elif strategy == "max_minutes":
-        # Maximize minutes
+    elif optimizer_objective == "max_minutes":
         prob += pulp.lpSum(
             df.loc[i, "proj_minutes"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
+    elif optimizer_objective == "max_ceil":
+        prob += pulp.lpSum(
+            df.loc[i, "proj_ceil"] * y[(i, s)]
+            for i in range(n_players)
+            for s in range(n_slots)
+        )
+    elif optimizer_objective == "max_floor":
+        prob += pulp.lpSum(
+            df.loc[i, "proj_floor"] * y[(i, s)]
+            for i in range(n_players)
+            for s in range(n_slots)
+        )
     else:
-        raise ValueError(f"Invalid strategy {strategy}")
+        raise ValueError(f"Invalid optimizer objective {optimizer_objective}")
 
     # Salary cap
     salary_cap = 50000
@@ -341,14 +350,12 @@ def build_ilp_with_slots(
 
 
 def extract_lineup(df: pd.DataFrame, y, proj_source: str) -> pd.DataFrame:
-    cols = get_proj_cols(proj_source)
-
     rows = []
     for (i, s), var in y.items():
         if var.value() == 1:
             rows.append(
                 {"slot": SLOTS[s]["name"]}
-                | {col: df.loc[i, col] for col in cols}
+                | {col: df.loc[i, col] for col in PROJ_COLS}
                 | {"player_index": i, "slot_index": s}
             )
 
@@ -362,14 +369,14 @@ def solve_top_k_lineups(
     df: pd.DataFrame,
     proj_source: str,
     k: int = 10,
-    strategy: str = "max_fpts",
+    optimizer_objective: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
     force_sal_50000: bool = False,
 ):
     prob, y = build_ilp_with_slots(
         df,
-        strategy=strategy,
+        optimizer_objective=optimizer_objective,
         locked_assignments=locked_assignments,
         n_force_top_projected=n_force_top_projected,
         force_sal_50000=force_sal_50000,
@@ -545,13 +552,22 @@ def generate_lineups(
                 working_df.index[working_df["player_key"] == player_key][0]
             ] = slot_index[position]
 
+    optimizer_objective = "max_fpts"
+
+    if "max_minutes" in strategy:
+        optimizer_objective = "max_minutes"
+    elif "max_ceil" in strategy:
+        optimizer_objective = "max_ceil"
+    elif "max_floor" in strategy:
+        optimizer_objective = "max_floor"
+
     # Generate top k lineups
     if "adjusted" in strategy:
         lineups = solve_top_k_lineups(
             working_df,
             proj_source=projection_source,
-            k=10,
-            strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
+            k=max(k_lineups, 10),
+            optimizer_objective=optimizer_objective,
             locked_assignments=locked_assignments,
             n_force_top_projected=n_force_top_projected,
             force_sal_50000=force_sal_50000,
@@ -574,8 +590,8 @@ def generate_lineups(
         lineups = solve_top_k_lineups(
             working_df,
             proj_source=projection_source,
-            k=1,
-            strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
+            k=k_lineups,
+            optimizer_objective=optimizer_objective,
             locked_assignments=locked_assignments,
             n_force_top_projected=n_force_top_projected,
             force_sal_50000=force_sal_50000,
@@ -627,11 +643,11 @@ def main(argv: Iterable[str]) -> int:
         n_force_top_projected=args.n_force_top_projected,
     )[0]
 
-    adjusted_lineups = generate_lineups(
+    max_fpts_lineups = generate_lineups(
         slate_id=args.slate_id,
         projection_source=args.projection_source,
         k_lineups=args.k_lineups,
-        strategy="adjusted_max_fpts_minutes_floor",
+        strategy="max_fpts",
         locked_players=locked_players,
         game_time_filter=game_time_filter,
         use_db=args.use_db,
@@ -648,7 +664,7 @@ def main(argv: Iterable[str]) -> int:
         write_lineup(top_fpts_lineup["lineup"], args.projection_source, out_file)
 
         # Print top k lineups to stdout and write them to the output file
-        for i, lineup in enumerate(adjusted_lineups):
+        for i, lineup in enumerate(max_fpts_lineups):
             out_file.write(f"\nLineup #{i} ")
             write_lineup(lineup["lineup"], args.projection_source, out_file)
 

@@ -29,8 +29,8 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
         "POS",
         "Position",
     ),
-    "ceiling": ("ceiling", "Ceiling", "CEILING", "ceil", "Ceil", "CEIL"),
-    "floor": ("floor", "Floor", "FLOOR"),
+    "proj_ceil": ("ceiling", "Ceiling", "CEILING", "ceil", "Ceil", "CEIL"),
+    "proj_floor": ("floor", "Floor", "FLOOR"),
     "team": ("team", "Team", "TEAM", "TeamAbbrev"),
     "game_info": {"Game Info"},
 }
@@ -121,29 +121,24 @@ SLOTS: List[Dict] = [
 SLOT_ORDER = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
 
 # Projection Columns
-RG_PROJ_COLS = [
+PROJ_COLS = [
     "player_name",
     "salary",
     "proj_minutes",
     "proj_fpts",
     "position",
-    "ceiling",
-    "floor",
-    "team",
-]
-ETR_PROJ_COLS = [
-    "player_name",
-    "salary",
-    "proj_minutes",
-    "proj_fpts",
-    "position",
-    "ceiling",
+    "proj_ceil",
+    "proj_floor",
     "team",
 ]
 
 # STRATEGIES
 STRATEGIES = [
+    "max_ceil",
+    "max_ceil_force_sal_50000",
     "max_minutes",
+    "max_floor",
+    "max_floor_force_sal_50000",
     "max_fpts",
     "max_fpts_adjusted_fragile",
     "max_fpts_minutes_floor",
@@ -176,7 +171,7 @@ class ResultsFileMeta:
     slate_id: str
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass()
 class SlateMeta:
     sport: str
     slate: str
@@ -229,6 +224,8 @@ def blend_projections(
         columns={
             "proj_fpts": "rg_fpts",
             "proj_minutes": "rg_minutes",
+            "proj_ceil": "rg_ceil",
+            "proj_floor": "rg_floor",
         }
     )
 
@@ -236,6 +233,8 @@ def blend_projections(
         columns={
             "proj_fpts": "etr_fpts",
             "proj_minutes": "etr_minutes",
+            "proj_ceil": "etr_ceil",
+            "proj_floor": "etr_floor",
         }
     )
 
@@ -244,9 +243,11 @@ def blend_projections(
 
     # Create blended + min columns
     blend["proj_fpts"] = weight_rg * blend["rg_fpts"] + weight_etr * blend["etr_fpts"]
-
     blend["proj_minutes"] = blend[["rg_minutes", "etr_minutes"]].min(axis=1)
-    blend["ceiling"] = blend["ceiling_x"]
+    blend["proj_ceil"] = weight_rg * blend["rg_ceil"] + weight_etr * blend["etr_ceil"]
+    blend["proj_floor"] = (
+        weight_rg * blend["rg_floor"] + weight_etr * blend["etr_floor"]
+    )
     blend["player_name"] = blend["player_name_x"]
     blend["position"] = blend["position_x"]
     blend["positions"] = blend["positions_x"]
@@ -255,8 +256,12 @@ def blend_projections(
     cols_to_drop = [
         "etr_fpts",
         "etr_minutes",
+        "etr_ceil",
+        "etr_floor",
         "rg_fpts",
         "rg_minutes",
+        "rg_ceil",
+        "rg_floor",
         "player_name_x",
         "player_name_y",
         "salary_x",
@@ -265,14 +270,27 @@ def blend_projections(
         "position_y",
         "positions_x",
         "positions_y",
-        "ceiling_x",
-        "ceiling_y",
         "team_x",
         "team_y",
     ]
     blend = blend.drop(columns=cols_to_drop)
 
     return blend
+
+
+def calcFloorFromMeanCeil(
+    mean: pd.Series, ceil: pd.Series, *, clamp_min: float = 0.0
+) -> pd.Series:
+    """
+    Simple symmetric 'p10-ish' floor proxy: floor = 2*mean - ceil.
+    """
+    floor = 2.0 * mean - ceil
+    floor = floor.clip(lower=clamp_min)
+
+    # Optional: keep floor <= mean when both are present
+    floor = pd.concat([floor, mean], axis=1).min(axis=1)
+
+    return floor
 
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
@@ -285,15 +303,6 @@ def ensure_output_path(path_str: str) -> Path:
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
-
-
-def get_proj_cols(proj_source: str) -> List[str]:
-    if proj_source == "rg":
-        return RG_PROJ_COLS
-    elif proj_source == "etr" or proj_source == "blend":
-        return ETR_PROJ_COLS
-    else:
-        raise ValueError("Invalid projection source.")
 
 
 def get_slates():
@@ -373,7 +382,6 @@ def load_projection_csv(
     else:
         raise ValueError("Invalid projection source.")
 
-    cols = get_proj_cols(source)
     df = pd.read_csv(path)
     df = normalize_columns(
         df,
@@ -386,16 +394,27 @@ def load_projection_csv(
             "team",
         ],
     )
-    df = df[cols].copy()
     df["salary"] = coerce_numeric(df["salary"])
     df["proj_minutes"] = coerce_numeric(df["proj_minutes"])
     df["proj_fpts"] = coerce_numeric(df["proj_fpts"])
     df["positions"] = df["position"].map(parse_positions)
-    df["ceiling"] = coerce_numeric(df["ceiling"])
+    df["proj_ceil"] = coerce_numeric(df["proj_ceil"])
     df["player_key"] = df["player_name"].map(normalize_name)
 
     if source == "rg":
-        df["floor"] = coerce_numeric(df["floor"])
+        df["proj_floor"] = coerce_numeric(df["proj_floor"])
+    elif source == "etr":
+        # Create a proj_floor proxy from mean + ceiling
+        # (Assumes ceiling acts like a high-quantile; symmetric lower quantile)
+        df["proj_floor"] = calcFloorFromMeanCeil(df["proj_fpts"], df["proj_ceil"])
+        bad = (
+            df["proj_ceil"].notna()
+            & df["proj_fpts"].notna()
+            & (df["proj_ceil"] < df["proj_fpts"])
+        )
+        if bad.any():
+            # If ceiling is below mean, fall back to something conservative: proj_floor = 0 or proj_floor = mean
+            df.loc[bad, "proj_floor"] = 0.0
 
     # ----------------------------------------
     # OVERRIDE missing projections for locked players
@@ -413,12 +432,11 @@ def load_projection_csv(
             if df.loc[mask, "proj_fpts"].isna().any():
                 df.loc[mask, "proj_fpts"] = 0.0
 
-            if df.loc[mask, "ceiling"].isna().any():
-                df.loc[mask, "ceiling"] = 0.0
+            if df.loc[mask, "proj_ceil"].isna().any():
+                df.loc[mask, "proj_ceil"] = 0.0
 
-            if source == "rg":
-                if df.loc[mask, "floor"].isna().any():
-                    df.loc[mask, "floor"] = 0.0
+            if df.loc[mask, "proj_floor"].isna().any():
+                df.loc[mask, "proj_floor"] = 0.0
 
         # Players missing entirely from projection file
         missing_keys = locked_keys - set(df["player_key"])
@@ -441,12 +459,9 @@ def load_projection_csv(
                     "proj_fpts": 0.0,
                     "positions": dk_row["positions"].iloc[0],
                     "team": dk_row["team"].iloc[0],
-                    "ceiling": 0.0,
+                    "proj_ceil": 0.0,
+                    "proj_floor": 0.0,
                 }
-
-                # RG-only column, optional
-                if "floor" in df.columns:
-                    new_row["floor"] = 0.0
 
                 df.loc[len(df)] = new_row
 
@@ -463,7 +478,7 @@ def load_projection_csv(
         df["proj_minutes_filled"] = df["proj_minutes"].fillna(0.0)
 
         if source == "rg":
-            df["floor_filled"] = df["floor"].fillna(0.0)
+            df["floor_filled"] = df["proj_floor"].fillna(0.0)
 
     df = df[df["positions"].map(bool)]
 

@@ -59,12 +59,12 @@ MODELS = [
 
 FILTER_TYPES = [
     "all",
-    "no_late_swaps",
-    "missing_late_swaps",
-    "late_swaps",
-    "fee_1",
-    "fee_2",
-    "fee_3",
+    # "no_late_swaps",
+    # "missing_late_swaps",
+    # "late_swaps",
+    # "fee_1",
+    # "fee_2",
+    # "fee_3",
 ]
 
 
@@ -117,7 +117,19 @@ class AggregateLineupMetrics:
     adjusted_fragile: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
+    max_ceil: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_ceil_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
     max_minutes: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
     max_fpts: AggregateFilterMetrics = dataclasses.field(
@@ -212,7 +224,15 @@ class LineupResult:
         default_factory=StrategyResult
     )
     adjusted_fragile: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_ceil: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_ceil_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
     max_minutes: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_floor: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_floor_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
     max_fpts: StrategyResult = dataclasses.field(default_factory=StrategyResult)
     max_fpts_adjusted_fragile: StrategyResult = dataclasses.field(
         default_factory=StrategyResult
@@ -376,21 +396,11 @@ def load_candidate_lineups(
     proj_source: str,
     proj: pd.DataFrame,
     dk_salaries: pd.DataFrame,
-    use_late_swaps: bool,
 ) -> StrategyLineups:
     candidate_lineups_path = (
         CANDIDATE_DIR_MAP[proj_source]
         / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
     )
-
-    if use_late_swaps:
-        game_times = sorted(
-            dk_salaries.set_index("player_key")["game_time_local"].unique()
-        )
-        candidate_lineups_path = (
-            CANDIDATE_DIR_MAP[proj_source]
-            / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}T{game_times[-1].strftime('%H%M')}.json"
-        )
 
     with open(candidate_lineups_path, "r") as f:
         payload = json.load(f)
@@ -431,18 +441,12 @@ def load_candidate_lineups(
 
 
 def load_candidates(
-    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries, use_late_swaps
+    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries
 ) -> TopLineups:
     lineups = TopLineups()
-    lineups.rg = load_candidate_lineups(
-        meta, "rg", rg_proj, dk_salaries, use_late_swaps
-    )
-    lineups.etr = load_candidate_lineups(
-        meta, "etr", etr_proj, dk_salaries, use_late_swaps
-    )
-    lineups.blend = load_candidate_lineups(
-        meta, "blend", blend_proj, dk_salaries, use_late_swaps
-    )
+    lineups.rg = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries)
+    lineups.etr = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries)
+    lineups.blend = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries)
 
     return lineups
 
@@ -904,7 +908,11 @@ def evaluate_h2h_lineups(
     strategy_top_lineups = getattr(top_lineups, proj_source.lower())
 
     strategy_lineup_map = {
+        "max_ceil": strategy_top_lineups.max_ceil[0],
+        "max_ceil_force_sal_50000": strategy_top_lineups.max_ceil_force_sal_50000[0],
         "max_minutes": strategy_top_lineups.max_minutes[0],
+        "max_floor": strategy_top_lineups.max_floor[0],
+        "max_floor_force_sal_50000": strategy_top_lineups.max_floor_force_sal_50000[0],
         "max_fpts": strategy_top_lineups.max_fpts[0],
         "max_fpts_minutes_floor": strategy_top_lineups.max_fpts_minutes_floor[0],
         "max_fpts_force_top_proj_1": strategy_top_lineups.max_fpts_force_top_proj_1[0],
@@ -1174,30 +1182,30 @@ def update_aggregate_linuep_metrics(model_name, slate, agg):
         strategy_dest = getattr(model_dest, strategy)
         strategy_src = getattr(model_src, strategy)
 
-        if slate_filter:
-            slate_dest = strategy_dest.by_slate.setdefault(
-                slate_filter, AggregateStrategyMetrics()
-            )
-            for allow_mirrors in [True, False]:
-                filter_win_rate = "win_rate" if allow_mirrors else "win_rate_no_mirror"
-                val_win_rate = getattr(strategy_src, filter_win_rate)
-                if val_win_rate is not None:
-                    setattr(
-                        slate_dest,
-                        filter_win_rate,
-                        getattr(slate_dest, filter_win_rate) + val_win_rate,
-                    )
-                    n_slates = "n_slates" if allow_mirrors else "n_slates_no_mirror"
-                    setattr(slate_dest, n_slates, getattr(slate_dest, n_slates) + 1)
+        # if slate_filter:
+        #     slate_dest = strategy_dest.by_slate.setdefault(
+        #         slate_filter, AggregateStrategyMetrics()
+        #     )
+        #     for allow_mirrors in [True, False]:
+        #         filter_win_rate = "win_rate" if allow_mirrors else "win_rate_no_mirror"
+        #         val_win_rate = getattr(strategy_src, filter_win_rate)
+        #         if val_win_rate is not None:
+        #             setattr(
+        #                 slate_dest,
+        #                 filter_win_rate,
+        #                 getattr(slate_dest, filter_win_rate) + val_win_rate,
+        #             )
+        #             n_slates = "n_slates" if allow_mirrors else "n_slates_no_mirror"
+        #             setattr(slate_dest, n_slates, getattr(slate_dest, n_slates) + 1)
 
-                filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
-                val_winnings = getattr(strategy_src, filter_winnings)
-                if val_winnings is not None:
-                    setattr(
-                        slate_dest,
-                        filter_winnings,
-                        getattr(slate_dest, filter_winnings) + val_winnings,
-                    )
+        #         filter_winnings = "winnings" if allow_mirrors else "winnings_no_mirror"
+        #         val_winnings = getattr(strategy_src, filter_winnings)
+        #         if val_winnings is not None:
+        #             setattr(
+        #                 slate_dest,
+        #                 filter_winnings,
+        #                 getattr(slate_dest, filter_winnings) + val_winnings,
+        #             )
         for filter_type in FILTER_TYPES:
             filter_dest = getattr(strategy_dest, filter_type)
 
@@ -1258,7 +1266,6 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         datetime=slate.datetime,
         id=slate.slate_id,
     )
-
     dk_salaries = load_dk_salaries_csv(meta)
 
     game_times = sorted(dk_salaries.set_index("player_key")["game_time_local"].unique())
@@ -1273,6 +1280,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
     for i in range(1, len(game_times)):
         lock_time = game_times[i].strftime("%H%M")
+        meta.datetime = f"{slate.datetime}T{lock_time}"
         etr_proj_path = (
             ETR_PROJ_DIR
             / f"{slate.sport}_{slate.slate}_{slate.site}_etr_projections_{slate.datetime}T{lock_time}.csv"
@@ -1280,6 +1288,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
         if not etr_proj_path.is_file():
             slate_result.missing_late_swap_proj = True
+            meta.datetime = f"{slate.datetime}"
 
             logging.info("Missing ETR late swap projections.")
             break
@@ -1291,6 +1300,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
         if not rg_proj_path.is_file():
             slate_result.missing_late_swap_proj = True
+            meta.datetime = f"{slate.datetime}"
 
             logging.info("Missing RG late swap projections.")
             break
@@ -1309,8 +1319,6 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         etr_merged,
         rg_merged,
         dk_salaries,
-        slate_result.has_late_swaps and not slate_result.missing_late_swap_proj,
-        # False,
     )
 
     # Evaluate strategies against H2H contests
@@ -1366,4 +1374,6 @@ if __name__ == "__main__":
     eval_df = evaluation_to_df(aggregate, slate_values)
     out_path = Path("data/processed/backtest_eval.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    eval_df.to_csv(out_path, index=False)
+    eval_df.sort_values(by="boot_p_breakeven", ascending=False).to_csv(
+        out_path, index=False
+    )
