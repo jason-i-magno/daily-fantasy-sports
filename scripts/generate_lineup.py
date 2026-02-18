@@ -23,6 +23,7 @@ from db.models import Contest, Player, Projection, Salary, Source
 from db.session import SessionLocal
 from scripts.utils import (
     ET,
+    MODELS,
     MT,
     PROJ_COLS,
     SLOT_ORDER,
@@ -33,6 +34,7 @@ from scripts.utils import (
     load_projections,
     parse_positions,
     parse_slate_id,
+    set_team_ranks,
     total_fragile_minutes,
 )
 
@@ -53,7 +55,7 @@ def build_player_index_map(
     return {name: idx for idx, name in enumerate(df[id_col])}
 
 
-def load_from_db(meta, projection_source: str):
+def load_from_db(meta, model: str):
     """Load DK salaries and projections from the database for the given slate."""
     session = SessionLocal()
     contest_date = datetime.fromisoformat(meta.datetime.split("T")[0])
@@ -162,14 +164,12 @@ def load_from_db(meta, projection_source: str):
             df["position"] = df["player_key"].map(lookup["positions"])
             df["positions"] = df["player_key"].map(lookup["positions"])
             df["team"] = df["player_key"].map(lookup["team"])
-        blend_df = blend_projections(rg_df, etr_df)
+        blend_df = blend_projections(rg_df, etr_df, model)
 
     return dk_df, rg_df, etr_df, blend_df
 
 
-def write_lineup(
-    lineup: pd.DataFrame, proj_source: str, out_file: io.TextIOWrapper
-) -> None:
+def write_lineup(lineup: pd.DataFrame, model: str, out_file: io.TextIOWrapper) -> None:
     lineup = lineup.copy()
     lineup["slot"] = pd.Categorical(lineup["slot"], categories=SLOT_ORDER, ordered=True)
     sorted_lineup = lineup.sort_values("slot")
@@ -209,6 +209,8 @@ def build_ilp_with_slots(
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
     force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
@@ -286,6 +288,40 @@ def build_ilp_with_slots(
             allowed = SLOTS[s]["allowed"]
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
+
+    # Require at least N players from the top projected team (team_proj_rank == 1)
+    if min_top_team_players:
+        if "team_proj_rank" not in df.columns:
+            raise ValueError(
+                "team_proj_rank column missing; load projections with team ranks before enforcing."
+            )
+        top_team_players = [
+            i for i in range(n_players) if df.loc[i, "team_proj_rank"] == 1
+        ]
+        if not top_team_players:
+            print(df.to_csv("test.csv"))
+            raise ValueError("No players found for team_proj_rank == 1.")
+        prob += (
+            pulp.lpSum(y[(i, s)] for i in top_team_players for s in range(n_slots))
+            >= min_top_team_players
+        )
+
+    # Require at least N players from the top projected game (game_proj_rank == 1)
+    if min_top_game_players:
+        if "game_proj_rank" not in df.columns:
+            raise ValueError(
+                "game_proj_rank column missing; load projections with game ranks before enforcing."
+            )
+        top_game_players = [
+            i for i in range(n_players) if df.loc[i, "game_proj_rank"] == 1
+        ]
+        if not top_game_players:
+            print(df.to_csv("test.csv"))
+            raise ValueError("No players found for game_proj_rank == 1.")
+        prob += (
+            pulp.lpSum(y[(i, s)] for i in top_game_players for s in range(n_slots))
+            >= min_top_game_players
+        )
 
     # -------------------------------------------
     # Game diversity: require players from >= 2 games
@@ -373,6 +409,8 @@ def solve_top_k_lineups(
     locked_assignments: dict[int, int] | None = None,
     n_force_top_projected: int = 0,
     force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     prob, y = build_ilp_with_slots(
         df,
@@ -380,6 +418,8 @@ def solve_top_k_lineups(
         locked_assignments=locked_assignments,
         n_force_top_projected=n_force_top_projected,
         force_sal_50000=force_sal_50000,
+        min_top_game_players=min_top_game_players,
+        min_top_team_players=min_top_team_players,
     )
 
     lineups = []
@@ -424,10 +464,10 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--slate-id", required=True, help="Slate ID")
     parser.add_argument(
-        "-p",
-        "--projection-source",
+        "-m",
+        "--model",
         type=str,
-        choices=["blend", "etr", "rg"],
+        choices=MODELS,
         required=True,
         help="Source of projection data.",
     )
@@ -467,7 +507,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 
 def generate_lineups(
     slate_id: str,
-    projection_source: str,
+    model: str,
     k_lineups: int,
     strategy: str = "max_fpts",
     locked_players: dict = {},
@@ -475,24 +515,26 @@ def generate_lineups(
     use_db: bool = False,
     n_force_top_projected: int = 0,
     force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     meta = parse_slate_id(slate_id)
     if use_db:
-        dk_df, rg_df, etr_df, blend_df = load_from_db(meta, projection_source)
+        dk_df, rg_df, etr_df, blend_df = load_from_db(meta, model)
         slate_games = len(set(dk_df["team"])) // 2 if not dk_df.empty else 0
     else:
         dk_df = load_dk_salaries_csv(meta)
         etr_df, rg_df, slate_games = load_projections(
             meta, dk_df=dk_df, remove_nan=True, locked_players=locked_players
         )
-        blend_df = blend_projections(rg_df, etr_df)
+        blend_df = blend_projections(rg_df, etr_df, model)
 
     working_df = None
-    if projection_source == "rg":
+    if model == "rg":
         working_df = rg_df.copy()
-    elif projection_source == "etr":
+    elif model == "etr":
         working_df = etr_df.copy()
-    elif projection_source == "blend":
+    elif "blend" in model:
         working_df = blend_df.copy()
     else:
         raise ValueError("Invalid projection source")
@@ -512,7 +554,7 @@ def generate_lineups(
         working_df["game_time_local"] = working_df["player_key"].map(
             lookup["game_time_local"]
         )
-    elif projection_source == "blend":
+    elif "blend" in model:
         working_df["game_time_local"] = working_df["player_key"].map(
             rg_df.set_index("player_key")["game_time_local"]
         )
@@ -552,6 +594,8 @@ def generate_lineups(
                 working_df.index[working_df["player_key"] == player_key][0]
             ] = slot_index[position]
 
+    working_df = set_team_ranks(working_df, dk_df=dk_df)
+
     optimizer_objective = "max_fpts"
 
     if "max_minutes" in strategy:
@@ -565,12 +609,14 @@ def generate_lineups(
     if "adjusted" in strategy:
         lineups = solve_top_k_lineups(
             working_df,
-            proj_source=projection_source,
+            proj_source=model,
             k=max(k_lineups, 10),
             optimizer_objective=optimizer_objective,
             locked_assignments=locked_assignments,
             n_force_top_projected=n_force_top_projected,
             force_sal_50000=force_sal_50000,
+            min_top_game_players=min_top_game_players,
+            min_top_team_players=min_top_team_players,
         )
 
         for lu in lineups:
@@ -589,12 +635,14 @@ def generate_lineups(
     else:
         lineups = solve_top_k_lineups(
             working_df,
-            proj_source=projection_source,
+            proj_source=model,
             k=k_lineups,
             optimizer_objective=optimizer_objective,
             locked_assignments=locked_assignments,
             n_force_top_projected=n_force_top_projected,
             force_sal_50000=force_sal_50000,
+            min_top_game_players=min_top_game_players,
+            min_top_team_players=min_top_team_players,
         )
 
     return lineups
@@ -623,7 +671,7 @@ def main(argv: Iterable[str]) -> int:
 
     top_minutes_lineup = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=1,
         strategy="max_minutes",
         locked_players=locked_players,
@@ -634,7 +682,7 @@ def main(argv: Iterable[str]) -> int:
 
     top_fpts_lineup = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=1,
         strategy="max_fpts",
         locked_players=locked_players,
@@ -645,7 +693,7 @@ def main(argv: Iterable[str]) -> int:
 
     max_fpts_lineups = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=args.k_lineups,
         strategy="max_fpts",
         locked_players=locked_players,
@@ -657,16 +705,16 @@ def main(argv: Iterable[str]) -> int:
     with open(args.output, "w") as out_file:
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup ")
-        write_lineup(top_minutes_lineup["lineup"], args.projection_source, out_file)
+        write_lineup(top_minutes_lineup["lineup"], args.model, out_file)
 
         # Write max fpts lineup info to output file
         out_file.write("\nMax FPTS Lineup ")
-        write_lineup(top_fpts_lineup["lineup"], args.projection_source, out_file)
+        write_lineup(top_fpts_lineup["lineup"], args.model, out_file)
 
         # Print top k lineups to stdout and write them to the output file
         for i, lineup in enumerate(max_fpts_lineups):
             out_file.write(f"\nLineup #{i} ")
-            write_lineup(lineup["lineup"], args.projection_source, out_file)
+            write_lineup(lineup["lineup"], args.model, out_file)
 
     return 0
 

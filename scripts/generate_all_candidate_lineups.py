@@ -12,6 +12,7 @@ from scripts.generate_lineup import (
 from scripts.utils import (
     CANDIDATE_DIR_MAP,
     ETR_PROJ_DIR,
+    MODELS,
     MT,
     RG_PROJ_DIR,
     SLOT_ORDER,
@@ -88,17 +89,13 @@ def create_candidates_file(
 
 def write_lineups_to_file(
     meta: ResultsFileMeta,
-    proj_source: str,
+    model: str,
     strategy,
     lineups,
-    top_lineup_keys,
 ):
     lineups_keys = [lineup_df_to_player_keys(lu["lineup"]) for lu in lineups]
 
-    if len(lineups_keys) == 0:
-        lineups_keys = [top_lineup_keys]
-
-    out_path = CANDIDATE_DIR_MAP[proj_source]
+    out_path = CANDIDATE_DIR_MAP[model]
 
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -122,8 +119,6 @@ def write_lineups_to_file(
         print(f"[UPDATED] {file_path.name} (replaced {strategy})")
     else:
         print(f"[ADDED] {file_path.name} (created {strategy})")
-
-    return file_path
 
 
 # ----------------------------
@@ -177,7 +172,6 @@ def main(argv: Iterable[str]) -> int:
                     else f"{slate.sport}_{slate.slate}_{slate.site}_{slate.datetime}T{lock_time}"
                 ),
             )
-            print(meta.id)
 
             etr_proj_path = (
                 ETR_PROJ_DIR
@@ -197,9 +191,9 @@ def main(argv: Iterable[str]) -> int:
                 logging.info(f"Missing RG projections {rg_proj_path.name}")
                 break
 
-            for proj_source in ["blend", "etr", "rg"]:
+            for model in MODELS:
                 candidates_path = (
-                    CANDIDATE_DIR_MAP[proj_source]
+                    CANDIDATE_DIR_MAP[model]
                     / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
                 )
 
@@ -207,18 +201,19 @@ def main(argv: Iterable[str]) -> int:
                     generate_candidates = True
 
                     logging.info(
-                        f"Missing {proj_source.upper()} candidate lineups file {candidates_path.name}"
+                        f"Missing {model.upper()} candidate lineups file {candidates_path.name}"
                     )
 
                     create_candidates_file(
                         meta=meta,
                         slate_size=len(set(dk_salaries["game_info"])),
-                        proj_source=proj_source,
+                        proj_source=model,
                     )
 
                 for strategy in STRATEGIES:
                     # generate_candidates = True if game_time_idx > 0 else False
                     generate_candidates = False
+                    valid_prev_candidates = True
 
                     with open(candidates_path, "r") as f:
                         data = json.load(f)
@@ -227,7 +222,7 @@ def main(argv: Iterable[str]) -> int:
                         generate_candidates = True
 
                         logging.info(
-                            f"Missing {proj_source.upper()} {strategy} lineups in {candidates_path.name}"
+                            f"Missing {model.upper()} {strategy} lineups in {candidates_path.name}"
                         )
 
                     # n_top_lineups = len(data[strategy])
@@ -236,13 +231,15 @@ def main(argv: Iterable[str]) -> int:
                     #     print(f"{n_top_lineups=}")
                     #     generate_candidates = True
 
+                    # if "from_top_game" in strategy or "from_top_team" in strategy:
+                    #     generate_candidates = True
+
                     locked_players = {}
                     game_time_filter = None
-                    top_lineup_keys = None
 
                     if prev_datetime:
                         prev_candidates_path = (
-                            CANDIDATE_DIR_MAP[proj_source]
+                            CANDIDATE_DIR_MAP[model]
                             / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{prev_datetime}.json"
                         )
                         with open(prev_candidates_path, "r") as f:
@@ -252,53 +249,78 @@ def main(argv: Iterable[str]) -> int:
                             meta.datetime
                         ).astimezone(MT) - timedelta(minutes=1)
 
-                        top_lineup_keys = data[strategy][0]
-                        locked_players = build_locked_players(
-                            top_lineup_keys,
-                            player_game_time,
-                            game_time_filter,
-                        )
+                        top_lineups_keys = data[strategy]
+
+                        if len(top_lineups_keys) > 0:
+                            locked_players = build_locked_players(
+                                top_lineups_keys[0],
+                                player_game_time,
+                                game_time_filter,
+                            )
+                        else:
+                            valid_prev_candidates = False
 
                     if generate_candidates:
-                        logging.info(
-                            f"Generating {proj_source.upper()} candidate lineups {candidates_path.name}"
-                        )
+                        if valid_prev_candidates:
+                            logging.info(
+                                f"Generating {model.upper()} candidate lineups {candidates_path.name}"
+                            )
 
-                        start_time = time.perf_counter()
+                            start_time = time.perf_counter()
 
-                        n_force_top_projected = 0
-                        if "force_top_proj" in strategy:
-                            n_force_top_projected = int(strategy[-1])
+                            n_force_top_projected = 0
+                            if "force_top_proj" in strategy:
+                                n_force_top_projected = int(strategy[-1])
 
-                        force_sal_50000 = False
-                        if "force_sal_50000" in strategy:
-                            force_sal_50000 = True
+                            force_sal_50000 = False
+                            if "force_sal_50000" in strategy:
+                                force_sal_50000 = True
 
-                        strategy_lineups = generate_lineups(
-                            slate_id=meta.id,
-                            projection_source=proj_source,
-                            k_lineups=args.k_lineups,
-                            strategy=strategy,
-                            locked_players=locked_players,
-                            game_time_filter=game_time_filter,
-                            use_db=False,
-                            n_force_top_projected=n_force_top_projected,
-                            force_sal_50000=force_sal_50000,
-                        )
+                            min_top_team_players = 0
+                            if "from_top_team" in strategy:
+                                min_top_team_players = int(strategy.split("_")[2])
 
-                        end_time = time.perf_counter()
+                            min_top_game_players = 0
+                            if "from_top_game" in strategy:
+                                min_top_game_players = int(strategy.split("_")[2])
 
-                        logging.info(
-                            f"Generated lineups in {end_time - start_time:.1f} seconds"
-                        )
+                            strategy_lineups = generate_lineups(
+                                slate_id=meta.id,
+                                model=model,
+                                k_lineups=args.k_lineups,
+                                strategy=strategy,
+                                locked_players=locked_players,
+                                game_time_filter=game_time_filter,
+                                use_db=False,
+                                n_force_top_projected=n_force_top_projected,
+                                force_sal_50000=force_sal_50000,
+                                min_top_game_players=min_top_game_players,
+                                min_top_team_players=min_top_team_players,
+                            )
 
-                        write_lineups_to_file(
-                            meta=meta,
-                            proj_source=proj_source,
-                            strategy=strategy,
-                            lineups=strategy_lineups,
-                            top_lineup_keys=top_lineup_keys,
-                        )
+                            end_time = time.perf_counter()
+
+                            logging.info(
+                                f"Generated lineups in {end_time - start_time:.1f} seconds"
+                            )
+
+                            write_lineups_to_file(
+                                meta=meta,
+                                model=model,
+                                strategy=strategy,
+                                lineups=strategy_lineups,
+                            )
+                        else:
+                            logging.info(
+                                "Previous candidates null. Writing null candidates."
+                            )
+
+                            write_lineups_to_file(
+                                meta=meta,
+                                model=model,
+                                strategy=strategy,
+                                lineups=[],
+                            )
 
             prev_datetime = meta.datetime
 

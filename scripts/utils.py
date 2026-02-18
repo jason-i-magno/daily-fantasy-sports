@@ -87,21 +87,27 @@ CANDIDATE_LINEUPS_DIR = DATA_DIR / "candidate_lineups"
 PROCESSED_DIR = DATA_DIR / "processed"
 RAW_LINEUPS_DIR = DATA_DIR / "raw"
 
-BLEND_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "blend"
-BLEND_OUTPUT_DIR = PROCESSED_DIR / "blend"
+BLEND_AVG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "blend_avg"
+BLEND_MIN_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "blend_min"
 DK_HISTORY_DIR = RAW_LINEUPS_DIR / "dk_history"
 DK_SALARIES_DIR = RAW_LINEUPS_DIR / "draftkings"
 ETR_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "etr"
-ETR_OUTPUT_DIR = PROCESSED_DIR / "etr"
 ETR_PROJ_DIR = RAW_LINEUPS_DIR / "etr"
 H2H_DIR = PROCESSED_DIR / "h2h"
 NBA_BOX_SCORES_DIR = RAW_LINEUPS_DIR / "nba_box_scores"
 RG_CANDIDATE_DIR = CANDIDATE_LINEUPS_DIR / "rotogrinders"
-RG_OUTPUT_DIR = PROCESSED_DIR / "rotogrinders"
 RG_PROJ_DIR = RAW_LINEUPS_DIR / "rotogrinders"
 
+MODELS = [
+    "blend_avg",
+    "blend_min",
+    "etr",
+    "rg",
+]
+
 CANDIDATE_DIR_MAP = {
-    "blend": BLEND_CANDIDATE_DIR,
+    "blend_avg": BLEND_AVG_CANDIDATE_DIR,
+    "blend_min": BLEND_MIN_CANDIDATE_DIR,
     "etr": ETR_CANDIDATE_DIR,
     "rg": RG_CANDIDATE_DIR,
 }
@@ -136,9 +142,23 @@ PROJ_COLS = [
 STRATEGIES = [
     "max_ceil",
     "max_ceil_force_sal_50000",
+    "max_ceil_1_from_top_team",
+    "max_ceil_2_from_top_team",
     "max_minutes",
     "max_floor",
+    "max_floor_adjusted_fragile",
+    "max_floor_minutes_floor",
     "max_floor_force_sal_50000",
+    "max_floor_1_from_top_game",
+    "max_floor_2_from_top_game",
+    "max_floor_3_from_top_game",
+    "max_floor_4_from_top_game",
+    "max_floor_5_from_top_game",
+    "max_floor_1_from_top_team",
+    "max_floor_2_from_top_team",
+    "max_floor_3_from_top_team",
+    "max_floor_4_from_top_team",
+    "max_floor_5_from_top_team",
     "max_fpts",
     "max_fpts_adjusted_fragile",
     "max_fpts_minutes_floor",
@@ -146,6 +166,18 @@ STRATEGIES = [
     "max_fpts_force_top_proj_2",
     "max_fpts_force_top_proj_3",
     "max_fpts_force_sal_50000",
+    "max_fpts_1_from_top_game",
+    "max_fpts_2_from_top_game",
+    "max_fpts_3_from_top_game",
+    "max_fpts_4_from_top_game",
+    "max_fpts_5_from_top_game",
+    "max_fpts_1_from_top_team",
+    "max_fpts_2_from_top_team",
+    "max_fpts_3_from_top_team",
+    "max_fpts_4_from_top_team",
+    "max_fpts_5_from_top_team",
+    "max_fpts_1_from_top_team_force_sal_50000",
+    "max_fpts_2_from_top_team_force_sal_50000",
 ]
 
 # Aliases
@@ -217,6 +249,7 @@ def adjusted_score(proj_fpts, proj_minutes, tfm, games):
 def blend_projections(
     rg_df: pd.DataFrame,
     etr_df: pd.DataFrame,
+    model: str,
     weight_rg: float = 0.5,
     weight_etr: float = 0.5,
 ) -> pd.DataFrame:
@@ -242,12 +275,21 @@ def blend_projections(
     blend = rg.merge(etr, on="player_key", how="inner")
 
     # Create blended + min columns
-    blend["proj_fpts"] = weight_rg * blend["rg_fpts"] + weight_etr * blend["etr_fpts"]
     blend["proj_minutes"] = blend[["rg_minutes", "etr_minutes"]].min(axis=1)
-    blend["proj_ceil"] = weight_rg * blend["rg_ceil"] + weight_etr * blend["etr_ceil"]
-    blend["proj_floor"] = (
-        weight_rg * blend["rg_floor"] + weight_etr * blend["etr_floor"]
-    )
+    if model == "blend_avg":
+        blend["proj_fpts"] = (
+            weight_rg * blend["rg_fpts"] + weight_etr * blend["etr_fpts"]
+        )
+        blend["proj_ceil"] = (
+            weight_rg * blend["rg_ceil"] + weight_etr * blend["etr_ceil"]
+        )
+        blend["proj_floor"] = (
+            weight_rg * blend["rg_floor"] + weight_etr * blend["etr_floor"]
+        )
+    else:
+        blend["proj_fpts"] = blend[["rg_fpts", "etr_fpts"]].min(axis=1)
+        blend["proj_ceil"] = blend[["rg_ceil", "etr_ceil"]].min(axis=1)
+        blend["proj_floor"] = blend[["rg_floor", "etr_floor"]].min(axis=1)
     blend["player_name"] = blend["player_name_x"]
     blend["position"] = blend["position_x"]
     blend["positions"] = blend["positions_x"]
@@ -481,6 +523,7 @@ def load_projection_csv(
             df["floor_filled"] = df["proj_floor"].fillna(0.0)
 
     df = df[df["positions"].map(bool)]
+    df = set_team_ranks(df, dk_df=dk_df)
 
     def infer_slate_games(frame: pd.DataFrame) -> int:
         # Infer slate size from unique teams (approx games = teams/2). Fallback to 8 if missing.
@@ -706,6 +749,60 @@ def print_table(
     if limit is not None:
         view = view.head(limit)
     print(view.to_string(index=False))
+
+
+def set_team_ranks(df, team_top_n: int = 8, dk_df: pd.DataFrame | None = None):
+    # Team projected totals: sum of top N projected players per team.
+    if team_top_n and "team" in df.columns:
+        top_n = max(int(team_top_n), 1)
+        team_totals = (
+            df.sort_values(["team", "proj_fpts"], ascending=[True, False])
+            .groupby("team", as_index=True)
+            .head(top_n)
+            .groupby("team")["proj_fpts"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        team_rank = {team: rank for rank, team in enumerate(team_totals.index, start=1)}
+        df["team_proj_rank"] = df["team"].map(team_rank)
+
+        # Game projected totals: sum of team totals for teams in the same game.
+        df["game_proj_rank"] = float("nan")
+        team_game = None
+        if "game_id" in df.columns:
+            team_game = (
+                df[["team", "game_id"]]
+                .dropna()
+                .groupby("team")["game_id"]
+                .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+            )
+        elif (
+            dk_df is not None and "team" in dk_df.columns and "game_id" in dk_df.columns
+        ):
+            team_game = (
+                dk_df[["team", "game_id"]]
+                .dropna()
+                .groupby("team")["game_id"]
+                .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+            )
+
+        if team_game is not None:
+            team_game = team_game.dropna()
+            if not team_game.empty:
+                game_totals = (
+                    team_totals.to_frame("team_total")
+                    .join(team_game.rename("game_id"), how="inner")
+                    .groupby("game_id")["team_total"]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                game_rank = {
+                    game_id: rank
+                    for rank, game_id in enumerate(game_totals.index, start=1)
+                }
+                df["game_proj_rank"] = df["team"].map(team_game).map(game_rank)
+
+    return df
 
 
 def total_fragile_minutes(lineup_df: pd.DataFrame) -> float:

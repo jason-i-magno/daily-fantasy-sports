@@ -30,6 +30,7 @@ from utils import (
     CANDIDATE_DIR_MAP,
     ETR_PROJ_DIR,
     H2H_DIR,
+    MODELS,
     RG_PROJ_DIR,
     SLOT_ORDER,
     SLOTS,
@@ -51,12 +52,6 @@ logger = logging.getLogger(__name__)
 # ----------------------------
 # Constants
 # ----------------------------
-MODELS = [
-    "blend",
-    "etr",
-    "rg",
-]
-
 FILTER_TYPES = [
     "all",
     # "no_late_swaps",
@@ -123,13 +118,55 @@ class AggregateLineupMetrics:
     max_ceil_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
+    max_ceil_1_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_ceil_2_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
     max_minutes: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
     max_floor: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
+    max_floor_adjusted_fragile: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_minutes_floor: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
     max_floor_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_1_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_2_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_3_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_4_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_5_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_1_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_2_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_3_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_4_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_floor_5_from_top_team: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
     max_fpts: AggregateFilterMetrics = dataclasses.field(
@@ -153,11 +190,50 @@ class AggregateLineupMetrics:
     max_fpts_force_sal_50000: AggregateFilterMetrics = dataclasses.field(
         default_factory=AggregateFilterMetrics
     )
+    max_fpts_1_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_2_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_3_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_4_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_5_from_top_game: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_1_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_2_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_3_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_4_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_5_from_top_team: AggregateFilterMetrics = dataclasses.field(
+        default_factory=AggregateFilterMetrics
+    )
+    max_fpts_1_from_top_team_force_sal_50000: AggregateFilterMetrics = (
+        dataclasses.field(default_factory=AggregateFilterMetrics)
+    )
+    max_fpts_2_from_top_team_force_sal_50000: AggregateFilterMetrics = (
+        dataclasses.field(default_factory=AggregateFilterMetrics)
+    )
 
 
 @dataclasses.dataclass
 class AllSlatesEvaluation:
-    blend: AggregateLineupMetrics = dataclasses.field(
+    blend_avg: AggregateLineupMetrics = dataclasses.field(
+        default_factory=AggregateLineupMetrics
+    )
+    blend_min: AggregateLineupMetrics = dataclasses.field(
         default_factory=AggregateLineupMetrics
     )
     etr: AggregateLineupMetrics = dataclasses.field(
@@ -228,9 +304,51 @@ class LineupResult:
     max_ceil_force_sal_50000: StrategyResult = dataclasses.field(
         default_factory=StrategyResult
     )
+    max_ceil_1_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_ceil_2_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
     max_minutes: StrategyResult = dataclasses.field(default_factory=StrategyResult)
     max_floor: StrategyResult = dataclasses.field(default_factory=StrategyResult)
+    max_floor_adjusted_fragile: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_minutes_floor: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
     max_floor_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_1_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_2_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_3_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_4_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_5_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_1_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_2_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_3_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_4_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_floor_5_from_top_team: StrategyResult = dataclasses.field(
         default_factory=StrategyResult
     )
     max_fpts: StrategyResult = dataclasses.field(default_factory=StrategyResult)
@@ -252,6 +370,42 @@ class LineupResult:
     max_fpts_force_sal_50000: StrategyResult = dataclasses.field(
         default_factory=StrategyResult
     )
+    max_fpts_1_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_2_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_3_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_4_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_5_from_top_game: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_1_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_2_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_3_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_4_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_5_from_top_team: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_1_from_top_team_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
+    max_fpts_2_from_top_team_force_sal_50000: StrategyResult = dataclasses.field(
+        default_factory=StrategyResult
+    )
 
 
 @dataclasses.dataclass
@@ -267,7 +421,8 @@ class OpponentResult:
 
 @dataclasses.dataclass
 class SlateResult:
-    blend: LineupResult = dataclasses.field(default_factory=LineupResult)
+    blend_avg: LineupResult = dataclasses.field(default_factory=LineupResult)
+    blend_min: LineupResult = dataclasses.field(default_factory=LineupResult)
     etr: LineupResult = dataclasses.field(default_factory=LineupResult)
     rg: LineupResult = dataclasses.field(default_factory=LineupResult)
     has_late_swaps: bool = True
@@ -288,7 +443,8 @@ class StrategyLineups:
 
 @dataclasses.dataclass
 class TopLineups:
-    blend: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
+    blend_avg: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
+    blend_min: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
     etr: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
     rg: StrategyLineups = dataclasses.field(default_factory=StrategyLineups)
 
@@ -393,12 +549,12 @@ def load_h2h_results(slate: ResultsFileMeta, results_df: pd.DataFrame) -> H2HRes
 
 def load_candidate_lineups(
     meta: SlateMeta,
-    proj_source: str,
+    model: str,
     proj: pd.DataFrame,
     dk_salaries: pd.DataFrame,
 ) -> StrategyLineups:
     candidate_lineups_path = (
-        CANDIDATE_DIR_MAP[proj_source]
+        CANDIDATE_DIR_MAP[model]
         / f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
     )
 
@@ -412,25 +568,26 @@ def load_candidate_lineups(
     n_lineups = 1
     strategy_lineups = StrategyLineups()
 
-    for candidate_type in STRATEGIES:
-        lineups_keys = payload[candidate_type][:n_lineups]
+    for strategy in STRATEGIES:
+        lineups_keys = payload[strategy][:n_lineups]
 
         for lineup_keys in lineups_keys:
             lineup_df = lineup_from_keys(lineup_keys, dk_salaries)
 
             if lineup_df is None:
+                print(f"Lineup is none {strategy} {model} {meta.datetime}")
                 continue
 
             errors = validate_lineup(lineup_df, dk_salaries)
 
             if errors:
-                print(candidate_type, proj_source)
+                print(strategy, model)
                 print(lineup_keys)
                 for error in errors:
                     logging.error(error)
         setattr(
             strategy_lineups,
-            candidate_type,
+            strategy,
             [
                 lineup_from_player_keys(proj, lineup_keys)
                 for lineup_keys in lineups_keys
@@ -441,12 +598,17 @@ def load_candidate_lineups(
 
 
 def load_candidates(
-    meta: SlateMeta, blend_proj, etr_proj, rg_proj, dk_salaries
+    meta: SlateMeta, blend_avg_proj, blend_min_proj, etr_proj, rg_proj, dk_salaries
 ) -> TopLineups:
     lineups = TopLineups()
     lineups.rg = load_candidate_lineups(meta, "rg", rg_proj, dk_salaries)
     lineups.etr = load_candidate_lineups(meta, "etr", etr_proj, dk_salaries)
-    lineups.blend = load_candidate_lineups(meta, "blend", blend_proj, dk_salaries)
+    lineups.blend_avg = load_candidate_lineups(
+        meta, "blend_avg", blend_avg_proj, dk_salaries
+    )
+    lineups.blend_min = load_candidate_lineups(
+        meta, "blend_min", blend_min_proj, dk_salaries
+    )
 
     return lineups
 
@@ -901,30 +1063,21 @@ def evaluate_h2h_lineups(
     slate_games: int,
     top_lineups: TopLineups,
     h2h_results: H2HResults,
-    proj_source: str,
+    model: str,
 ) -> List[ContestResult]:
     lineup_result = LineupResult()
 
-    strategy_top_lineups = getattr(top_lineups, proj_source.lower())
+    strategy_top_lineups = getattr(top_lineups, model.lower())
 
-    strategy_lineup_map = {
-        "max_ceil": strategy_top_lineups.max_ceil[0],
-        "max_ceil_force_sal_50000": strategy_top_lineups.max_ceil_force_sal_50000[0],
-        "max_minutes": strategy_top_lineups.max_minutes[0],
-        "max_floor": strategy_top_lineups.max_floor[0],
-        "max_floor_force_sal_50000": strategy_top_lineups.max_floor_force_sal_50000[0],
-        "max_fpts": strategy_top_lineups.max_fpts[0],
-        "max_fpts_minutes_floor": strategy_top_lineups.max_fpts_minutes_floor[0],
-        "max_fpts_force_top_proj_1": strategy_top_lineups.max_fpts_force_top_proj_1[0],
-        "max_fpts_force_top_proj_2": strategy_top_lineups.max_fpts_force_top_proj_2[0],
-        "max_fpts_force_top_proj_3": strategy_top_lineups.max_fpts_force_top_proj_3[0],
-        "max_fpts_force_sal_50000": strategy_top_lineups.max_fpts_force_sal_50000[0],
-        "max_fpts_adjusted_fragile": strategy_top_lineups.max_fpts_adjusted_fragile[0],
-    }
-
+    strategy_lineup_map = {}
     for strategy in STRATEGIES:
-        if strategy not in strategy_lineup_map:
-            raise ValueError(f"Strategy '{strategy}' missing from strategy_lineup_map")
+        strategy_lineups = getattr(strategy_top_lineups, strategy)
+        strategy_lineup_map[strategy] = (
+            None
+            if len(strategy_lineups) == 0
+            else getattr(strategy_top_lineups, strategy)[0]
+        )
+
         if not hasattr(lineup_result, strategy):
             raise ValueError(
                 f"Strategy '{strategy}' missing from LineupResult/aggregate definitions"
@@ -948,7 +1101,7 @@ def evaluate_h2h_lineups(
                 getattr(h2h_results, f"lineup_{fee}"),
                 slate_id,
                 slate_games,
-                f"{proj_source} H2H ${fee} {strategy}",
+                f"{model} H2H ${fee} {strategy}",
                 opponent=getattr(h2h_results, f"opponent_{fee}"),
             )
 
@@ -1170,9 +1323,9 @@ def collect_slate_values(
     return dict(values)
 
 
-def update_aggregate_linuep_metrics(model_name, slate, agg):
-    model_src = getattr(slate, model_name.split("_")[0])  # LineupResult
-    model_dest = getattr(agg, model_name)  # AggregateLineupMetrics
+def update_aggregate_linuep_metrics(model, slate, agg):
+    model_src = getattr(slate, model)  # LineupResult
+    model_dest = getattr(agg, model)  # AggregateLineupMetrics
 
     fee_filters = {"fee_1", "fee_2", "fee_3"}
     slate_filter = slate.slate
@@ -1276,7 +1429,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
 
     if n_game_times == 1:
         slate_result.has_late_swaps = False
-        logging.info("No late swaps")
+        logging.debug("No late swaps")
 
     for i in range(1, len(game_times)):
         lock_time = game_times[i].strftime("%H%M")
@@ -1290,7 +1443,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
             slate_result.missing_late_swap_proj = True
             meta.datetime = f"{slate.datetime}"
 
-            logging.info("Missing ETR late swap projections.")
+            logging.debug("Missing ETR late swap projections.")
             break
 
         rg_proj_path = (
@@ -1302,20 +1455,23 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
             slate_result.missing_late_swap_proj = True
             meta.datetime = f"{slate.datetime}"
 
-            logging.info("Missing RG late swap projections.")
+            logging.debug("Missing RG late swap projections.")
             break
 
     etr_proj, rg_proj, slate_games = load_projections(meta, remove_nan=False)
     slate_result.slate_games = slate_games
-    blend_proj = blend_projections(rg_proj, etr_proj)
+    blend_avg_proj = blend_projections(rg_proj, etr_proj, "blend_avg")
+    blend_min_proj = blend_projections(rg_proj, etr_proj, "blend_min")
 
     box_scores_df = load_nba_box_scores_csv(slate.datetime)
     rg_merged = join_proj_results(rg_proj, box_scores_df)
     etr_merged = join_proj_results(etr_proj, box_scores_df)
-    blend_merged = join_proj_results(blend_proj, box_scores_df)
+    blend_avg_merged = join_proj_results(blend_avg_proj, box_scores_df)
+    blend_min_merged = join_proj_results(blend_min_proj, box_scores_df)
     top_lineups = load_candidates(
         meta,
-        blend_merged,
+        blend_avg_merged,
+        blend_min_merged,
         etr_merged,
         rg_merged,
         dk_salaries,
@@ -1329,7 +1485,7 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         slate_games=slate_games,
         top_lineups=top_lineups,
         h2h_results=h2h_results,
-        proj_source="RG",
+        model="RG",
     )
 
     slate_result.etr = evaluate_h2h_lineups(
@@ -1337,15 +1493,23 @@ def evaluate_slate(slate: ResultsFileMeta) -> pd.DataFrame:
         slate_games=slate_games,
         top_lineups=top_lineups,
         h2h_results=h2h_results,
-        proj_source="ETR",
+        model="ETR",
     )
 
-    slate_result.blend = evaluate_h2h_lineups(
+    slate_result.blend_avg = evaluate_h2h_lineups(
         slate_id=slate.slate_id,
         slate_games=slate_games,
         top_lineups=top_lineups,
         h2h_results=h2h_results,
-        proj_source="BLEND",
+        model="BLEND_AVG",
+    )
+
+    slate_result.blend_min = evaluate_h2h_lineups(
+        slate_id=slate.slate_id,
+        slate_games=slate_games,
+        top_lineups=top_lineups,
+        h2h_results=h2h_results,
+        model="BLEND_MIN",
     )
 
     return slate_result
