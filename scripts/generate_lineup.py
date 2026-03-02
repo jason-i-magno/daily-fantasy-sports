@@ -10,27 +10,31 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pulp
-from utils import (
-    CANDIDATE_LINEUPS_DIR,
+from sqlalchemy import select
+
+from db.models import Contest, Player, Projection, Salary, Source
+from db.session import SessionLocal
+from scripts.utils import (
+    ET,
+    MODELS,
     MT,
+    PROJ_COLS,
     SLOT_ORDER,
     SLOTS,
     adjusted_score,
     blend_projections,
-    get_proj_cols,
-    lineup_df_to_player_keys,
     load_dk_salaries_csv,
     load_projections,
+    parse_positions,
     parse_slate_id,
+    set_team_ranks,
     total_fragile_minutes,
 )
 
@@ -51,45 +55,133 @@ def build_player_index_map(
     return {name: idx for idx, name in enumerate(df[id_col])}
 
 
-def patch_lineup_file(path: Path, top_adjusted_player_keys: List[List[int]]) -> None:
-    """
-    Add 'top_adjusted' to an existing candidate_lineups_*.json
-    without touching top_fpts or top_minutes.
-    """
-    with open(path, "r") as f:
-        data = json.load(f)
+def load_from_db(meta, model: str):
+    """Load DK salaries and projections from the database for the given slate."""
+    session = SessionLocal()
+    contest_date = datetime.fromisoformat(meta.datetime.split("T")[0])
+    contest = (
+        session.execute(
+            select(Contest).where(
+                Contest.date == contest_date, Contest.slate_type == meta.slate
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if not contest:
+        raise ValueError(
+            f"No contest found in DB for {meta.slate} on {contest_date.date()}"
+        )
 
-    existing = "top_adjusted" in data
+    # Salaries
+    sal_rows = session.execute(
+        select(Salary, Player)
+        .join(Player, Salary.player_id == Player.id)
+        .where(Salary.contest_id == contest.id)
+    ).all()
 
-    # Add new field
-    data["top_adjusted"] = top_adjusted_player_keys
+    salary_records = []
+    for row in sal_rows:
+        salary = row[0]
+        player = row[1]
+        salary_records.append(
+            {
+                "player_name": player.key,
+                "player_key": player.key,
+                "salary": salary.salary,
+                "position": salary.position,
+                "positions": parse_positions(salary.position),
+                "team": salary.team,
+                "game_info": salary.game or "",
+                "game_id": salary.game or "",
+                "game_time_local": pd.NaT,
+            }
+        )
+    dk_df = pd.DataFrame(salary_records)
 
-    # Write back (preserving formatting)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    def projection_df(source_name: str) -> pd.DataFrame:
+        source = session.execute(
+            select(Source).where(Source.name == source_name)
+        ).scalar_one_or_none()
+        if not source:
+            return pd.DataFrame()
+        rows = session.execute(
+            select(Projection, Player)
+            .join(Player, Projection.player_id == Player.id)
+            .where(
+                Projection.contest_id == contest.id,
+                Projection.source_id == source.id,
+            )
+            .order_by(Projection.snapshot_time.desc())
+        ).all()
+        if not rows:
+            return pd.DataFrame()
+        latest_time = rows[0][0].snapshot_time
+        rows = [r for r in rows if r[0].snapshot_time == latest_time]
+        recs = []
+        for proj, player in rows:
+            recs.append(
+                {
+                    "player_name": player.key,
+                    "player_key": player.key,
+                    "proj_minutes": proj.proj_minutes,
+                    "proj_fpts": proj.proj_fpts,
+                    "game_time_local": proj.snapshot_time.replace(tzinfo=ET).astimezone(
+                        MT
+                    ),
+                }
+            )
+        return pd.DataFrame(recs)
 
-    if existing:
-        print(f"[UPDATED] {path.name} (replaced top_adjusted)")
-    else:
-        print(f"[ADDED] {path.name} (created top_adjusted)")
+    rg_df = projection_df("rg")
+    etr_df = projection_df("etr")
+
+    def attach_meta(proj_df: pd.DataFrame) -> pd.DataFrame:
+        if proj_df.empty:
+            return proj_df
+        lookup = dk_df.set_index("player_key")
+        proj_df = proj_df.copy()
+        proj_df["salary"] = proj_df["player_key"].map(lookup["salary"])
+        proj_df["positions"] = proj_df["player_key"].map(lookup["positions"])
+        proj_df["team"] = proj_df["player_key"].map(lookup["team"])
+        if "proj_ceil" not in proj_df:
+            proj_df["proj_ceil"] = 0.0
+        if "proj_floor" not in proj_df:
+            proj_df["proj_floor"] = 0.0
+        return proj_df
+
+    rg_df = attach_meta(rg_df)
+    etr_df = attach_meta(etr_df)
+
+    session.close()
+
+    blend_df = pd.DataFrame()
+    if not rg_df.empty and not etr_df.empty:
+        # To blend, add salary/positions from DK set
+        lookup = dk_df.set_index("player_key")
+        for df in (rg_df, etr_df):
+            df["salary"] = df["player_key"].map(lookup["salary"])
+            df["position"] = df["player_key"].map(lookup["positions"])
+            df["positions"] = df["player_key"].map(lookup["positions"])
+            df["team"] = df["player_key"].map(lookup["team"])
+        blend_df = blend_projections(rg_df, etr_df, model)
+
+    return dk_df, rg_df, etr_df, blend_df
 
 
-def write_lineup(
-    lineup: pd.DataFrame, proj_source: str, out_file: io.TextIOWrapper
-) -> None:
-    cols = get_proj_cols(proj_source)
-
+def write_lineup(lineup: pd.DataFrame, model: str, out_file: io.TextIOWrapper) -> None:
     lineup = lineup.copy()
     lineup["slot"] = pd.Categorical(lineup["slot"], categories=SLOT_ORDER, ordered=True)
     sorted_lineup = lineup.sort_values("slot")
 
-    out_file.write(sorted_lineup[["slot"] + cols].to_string(index=False))
+    out_file.write(sorted_lineup[["slot"] + PROJ_COLS].to_string(index=False))
     totals = {
         "total_salary": lineup["salary"].sum(),
         "total_proj_minutes": lineup["proj_minutes"].sum(),
         "total_proj_fpts": lineup["proj_fpts"].sum(),
-        "total_ceiling": lineup["ceiling"].sum(),
-    } | {"total_floor": lineup["floor"].sum() if "floor" in cols else 0.0}
+        "total_proj_ceil": lineup["proj_ceil"].sum(),
+        "total_floor": lineup["proj_floor"].sum(),
+    }
 
     out_file.write("\nTotals:")
     for k, v in totals.items():
@@ -113,8 +205,12 @@ slot_index = {
 
 def build_ilp_with_slots(
     df: pd.DataFrame,
-    strategy: str = "max_fpts",
+    optimizer_objective: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
+    n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     prob = pulp.LpProblem("dk_max_minutes_with_slots", pulp.LpMaximize)
 
@@ -128,33 +224,54 @@ def build_ilp_with_slots(
     }
 
     # Objective
-    if strategy == "max_fpts":
-        # Maximize fpts
+    if optimizer_objective == "max_fpts":
         prob += pulp.lpSum(
             df.loc[i, "proj_fpts"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
-    elif strategy == "max_minutes":
-        # Maximize minutes
+    elif optimizer_objective == "max_minutes":
         prob += pulp.lpSum(
             df.loc[i, "proj_minutes"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
-    else:
-        raise ValueError(f"Invalid strategy {strategy}")
-
-    # Salary cap
-    salary_cap = 50000
-    prob += (
-        pulp.lpSum(
-            df.loc[i, "salary"] * y[(i, s)]
+    elif optimizer_objective == "max_ceil":
+        prob += pulp.lpSum(
+            df.loc[i, "proj_ceil"] * y[(i, s)]
             for i in range(n_players)
             for s in range(n_slots)
         )
-        <= salary_cap
-    )
+    elif optimizer_objective == "max_floor":
+        prob += pulp.lpSum(
+            df.loc[i, "proj_floor"] * y[(i, s)]
+            for i in range(n_players)
+            for s in range(n_slots)
+        )
+    else:
+        raise ValueError(f"Invalid optimizer objective {optimizer_objective}")
+
+    # Salary cap
+    salary_cap = 50000
+
+    if force_sal_50000:
+        prob += (
+            pulp.lpSum(
+                df.loc[i, "salary"] * y[(i, s)]
+                for i in range(n_players)
+                for s in range(n_slots)
+            )
+            == salary_cap
+        )
+    else:
+        prob += (
+            pulp.lpSum(
+                df.loc[i, "salary"] * y[(i, s)]
+                for i in range(n_players)
+                for s in range(n_slots)
+            )
+            <= salary_cap
+        )
 
     # Each slot filled once
     for s in range(n_slots):
@@ -171,6 +288,40 @@ def build_ilp_with_slots(
             allowed = SLOTS[s]["allowed"]
             if allowed is not None and not (ppos & allowed):
                 prob += y[(i, s)] == 0
+
+    # Require at least N players from the top projected team (team_proj_rank == 1)
+    if min_top_team_players:
+        if "team_proj_rank" not in df.columns:
+            raise ValueError(
+                "team_proj_rank column missing; load projections with team ranks before enforcing."
+            )
+        top_team_players = [
+            i for i in range(n_players) if df.loc[i, "team_proj_rank"] == 1
+        ]
+        if not top_team_players:
+            print(df.to_csv("test.csv"))
+            raise ValueError("No players found for team_proj_rank == 1.")
+        prob += (
+            pulp.lpSum(y[(i, s)] for i in top_team_players for s in range(n_slots))
+            >= min_top_team_players
+        )
+
+    # Require at least N players from the top projected game (game_proj_rank == 1)
+    if min_top_game_players:
+        if "game_proj_rank" not in df.columns:
+            raise ValueError(
+                "game_proj_rank column missing; load projections with game ranks before enforcing."
+            )
+        top_game_players = [
+            i for i in range(n_players) if df.loc[i, "game_proj_rank"] == 1
+        ]
+        if not top_game_players:
+            print(df.to_csv("test.csv"))
+            raise ValueError("No players found for game_proj_rank == 1.")
+        prob += (
+            pulp.lpSum(y[(i, s)] for i in top_game_players for s in range(n_slots))
+            >= min_top_game_players
+        )
 
     # -------------------------------------------
     # Game diversity: require players from >= 2 games
@@ -223,22 +374,24 @@ def build_ilp_with_slots(
                     prob += y[(player_idx, other_s)] == 0
 
     # Force top projected scorer(s) into the lineup
-    # top_fpts_ids = df.sort_values("proj_fpts", ascending=False).head(0).index.tolist()
-    # for top_fpts_id in top_fpts_ids:
-    #     prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
+    top_fpts_ids = (
+        df.sort_values("proj_fpts", ascending=False)
+        .head(n_force_top_projected)
+        .index.tolist()
+    )
+    for top_fpts_id in top_fpts_ids:
+        prob += pulp.lpSum(y[(top_fpts_id, s)] for s in range(len(SLOTS))) == 1
 
     return prob, y
 
 
 def extract_lineup(df: pd.DataFrame, y, proj_source: str) -> pd.DataFrame:
-    cols = get_proj_cols(proj_source)
-
     rows = []
     for (i, s), var in y.items():
         if var.value() == 1:
             rows.append(
                 {"slot": SLOTS[s]["name"]}
-                | {col: df.loc[i, col] for col in cols}
+                | {col: df.loc[i, col] for col in PROJ_COLS}
                 | {"player_index": i, "slot_index": s}
             )
 
@@ -252,11 +405,21 @@ def solve_top_k_lineups(
     df: pd.DataFrame,
     proj_source: str,
     k: int = 10,
-    strategy: str = "max_fpts",
+    optimizer_objective: str = "max_fpts",
     locked_assignments: dict[int, int] | None = None,
+    n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     prob, y = build_ilp_with_slots(
-        df, strategy=strategy, locked_assignments=locked_assignments
+        df,
+        optimizer_objective=optimizer_objective,
+        locked_assignments=locked_assignments,
+        n_force_top_projected=n_force_top_projected,
+        force_sal_50000=force_sal_50000,
+        min_top_game_players=min_top_game_players,
+        min_top_team_players=min_top_team_players,
     )
 
     lineups = []
@@ -301,10 +464,10 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--slate-id", required=True, help="Slate ID")
     parser.add_argument(
-        "-p",
-        "--projection-source",
+        "-m",
+        "--model",
         type=str,
-        choices=["blend", "etr", "rg"],
+        choices=MODELS,
         required=True,
         help="Source of projection data.",
     )
@@ -323,36 +486,55 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         help="Flag to write candidate lineups to a file.",
     )
     parser.add_argument(
-        "-patch",
-        "--patch-candidate-lineups",
+        "--use-db",
         action="store_true",
-        help="Flag to patch candidate lineups.",
+        help="Load salaries/projections from the database instead of CSVs.",
+    )
+    parser.add_argument(
+        "-f",
+        "--filter-game-time",
+        action="store_true",
+        help="Load salaries/projections from the database instead of CSVs.",
+    )
+    parser.add_argument(
+        "-n",
+        "--n-force-top-projected",
+        default=0,
+        help="Top N projected players to force",
     )
     return parser.parse_args(argv)
 
 
 def generate_lineups(
     slate_id: str,
-    projection_source: str,
+    model: str,
     k_lineups: int,
     strategy: str = "max_fpts",
-    patch_candidate_lineups: bool = False,
     locked_players: dict = {},
     game_time_filter: datetime = datetime.now(ZoneInfo("America/Denver")),
+    use_db: bool = False,
+    n_force_top_projected: int = 0,
+    force_sal_50000: bool = False,
+    min_top_game_players: int = 0,
+    min_top_team_players: int = 0,
 ):
     meta = parse_slate_id(slate_id)
-    dk_df = load_dk_salaries_csv(meta)
-    etr_df, rg_df, slate_games = load_projections(
-        meta, dk_df=dk_df, remove_nan=True, locked_players=locked_players
-    )
-    blend_df = blend_projections(rg_df, etr_df)
+    if use_db:
+        dk_df, rg_df, etr_df, blend_df = load_from_db(meta, model)
+        slate_games = len(set(dk_df["team"])) // 2 if not dk_df.empty else 0
+    else:
+        dk_df = load_dk_salaries_csv(meta)
+        etr_df, rg_df, slate_games = load_projections(
+            meta, dk_df=dk_df, remove_nan=True, locked_players=locked_players
+        )
+        blend_df = blend_projections(rg_df, etr_df, model)
 
     working_df = None
-    if projection_source == "rg":
+    if model == "rg":
         working_df = rg_df.copy()
-    elif projection_source == "etr":
+    elif model == "etr":
         working_df = etr_df.copy()
-    elif projection_source == "blend":
+    elif "blend" in model:
         working_df = blend_df.copy()
     else:
         raise ValueError("Invalid projection source")
@@ -368,9 +550,14 @@ def generate_lineups(
     working_df["game_info"] = working_df["player_key"].map(lookup["game_info"])
 
     # Merge in local game time column
-    working_df["game_time_local"] = working_df["player_key"].map(
-        lookup["game_time_local"]
-    )
+    if not use_db:
+        working_df["game_time_local"] = working_df["player_key"].map(
+            lookup["game_time_local"]
+        )
+    elif "blend" in model:
+        working_df["game_time_local"] = working_df["player_key"].map(
+            rg_df.set_index("player_key")["game_time_local"]
+        )
 
     working_df = add_game_id_columns(working_df)
 
@@ -382,7 +569,7 @@ def generate_lineups(
     working_df = working_df.reset_index(drop=True)
     locked_keys = set(locked_players.keys())
 
-    if locked_players:
+    if game_time_filter:
         working_df = working_df[
             (working_df["player_key"].isin(locked_keys))
             | (working_df["game_time_local"] > game_time_filter)
@@ -407,16 +594,31 @@ def generate_lineups(
                 working_df.index[working_df["player_key"] == player_key][0]
             ] = slot_index[position]
 
-    # Generate top k lineups
-    lineups = solve_top_k_lineups(
-        working_df,
-        proj_source=projection_source,
-        k=k_lineups,
-        strategy="max_fpts" if "max_fpts" in strategy else "max_minutes",
-        locked_assignments=locked_assignments,
-    )
+    working_df = set_team_ranks(working_df, dk_df=dk_df)
 
+    optimizer_objective = "max_fpts"
+
+    if "max_minutes" in strategy:
+        optimizer_objective = "max_minutes"
+    elif "max_ceil" in strategy:
+        optimizer_objective = "max_ceil"
+    elif "max_floor" in strategy:
+        optimizer_objective = "max_floor"
+
+    # Generate top k lineups
     if "adjusted" in strategy:
+        lineups = solve_top_k_lineups(
+            working_df,
+            proj_source=model,
+            k=max(k_lineups, 10),
+            optimizer_objective=optimizer_objective,
+            locked_assignments=locked_assignments,
+            n_force_top_projected=n_force_top_projected,
+            force_sal_50000=force_sal_50000,
+            min_top_game_players=min_top_game_players,
+            min_top_team_players=min_top_team_players,
+        )
+
         for lu in lineups:
             tfm = total_fragile_minutes(lu["lineup"])
             lu["total_fragile_minutes"] = tfm
@@ -428,26 +630,19 @@ def generate_lineups(
                 slate_games,
             )
 
-        lineups = sorted(lineups, key=lambda x: x["adjusted_score"], reverse=True)
+        lineups = [sorted(lineups, key=lambda x: x["adjusted_score"], reverse=True)[0]]
 
-    if patch_candidate_lineups:
-        if projection_source == "rg":
-            candidate_subdir = "rotogrinders"
-        elif projection_source == "etr":
-            candidate_subdir = "etr"
-        elif projection_source == "blend":
-            candidate_subdir = "blend"
-
-        top_adjusted_player_keys = [
-            lineup_df_to_player_keys(lu["lineup"]) for lu in lineups
-        ]
-
-        patch_filename = f"{meta.sport}_{meta.slate}_{meta.site}_candidate_lineups_{meta.datetime}.json"
-        patch_path = CANDIDATE_LINEUPS_DIR / candidate_subdir / patch_filename
-
-        patch_lineup_file(
-            patch_path,
-            top_adjusted_player_keys,
+    else:
+        lineups = solve_top_k_lineups(
+            working_df,
+            proj_source=model,
+            k=k_lineups,
+            optimizer_objective=optimizer_objective,
+            locked_assignments=locked_assignments,
+            n_force_top_projected=n_force_top_projected,
+            force_sal_50000=force_sal_50000,
+            min_top_game_players=min_top_game_players,
+            min_top_team_players=min_top_team_players,
         )
 
     return lineups
@@ -457,18 +652,17 @@ def main(argv: Iterable[str]) -> int:
     args = parse_args(argv)
 
     locked_players = {}
-    # locked_players = {
-    #     "derrickwhite": "PG",
-    #     "donovanmitchell": "SG",
-    #     "jakelaravia": "SF",
-    #     # "bobbyportis": "PF",
-    #     "jocklandale": "C",
-    #     "dennisschroder": "G",
-    #     # "jordangoodwin": "F",
-    #     "paytonpritchard": "UTIL",
-    # }
-
-    game_time_filter = datetime.now(MT)
+    locked_players = {
+        # "collingillespie": "PG",
+        # "devincarter": "SG",
+        # "niqueclifford": "SF",
+        # "dylancardwell": "PF",
+        "donovanclingan": "C",
+        "vincewilliamsjr": "G",
+        # "micahpotter": "F",
+        "jrueholiday": "UTIL",
+    }
+    game_time_filter = datetime.now(MT) if args.filter_game_time else None
 
     if "T" in args.slate_id:
         game_time_filter = datetime.fromisoformat(
@@ -477,47 +671,50 @@ def main(argv: Iterable[str]) -> int:
 
     top_minutes_lineup = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=1,
         strategy="max_minutes",
-        patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )[0]
 
     top_fpts_lineup = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=1,
         strategy="max_fpts",
-        patch_candidate_lineups=args.patch_candidate_lineups,
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )[0]
 
-    adjusted_lineups = generate_lineups(
+    max_fpts_lineups = generate_lineups(
         slate_id=args.slate_id,
-        projection_source=args.projection_source,
+        model=args.model,
         k_lineups=args.k_lineups,
-        strategy="adjusted_max_fpts_minutes_floor",
-        patch_candidate_lineups=args.patch_candidate_lineups,
+        strategy="max_fpts",
         locked_players=locked_players,
         game_time_filter=game_time_filter,
+        use_db=args.use_db,
+        n_force_top_projected=args.n_force_top_projected,
     )
 
     with open(args.output, "w") as out_file:
         # Write max minute lineup info to output file
         out_file.write("\nMax Minutes Lineup ")
-        write_lineup(top_minutes_lineup["lineup"], args.projection_source, out_file)
+        write_lineup(top_minutes_lineup["lineup"], args.model, out_file)
 
         # Write max fpts lineup info to output file
         out_file.write("\nMax FPTS Lineup ")
-        write_lineup(top_fpts_lineup["lineup"], args.projection_source, out_file)
+        write_lineup(top_fpts_lineup["lineup"], args.model, out_file)
 
         # Print top k lineups to stdout and write them to the output file
-        for i, lineup in enumerate(adjusted_lineups):
+        for i, lineup in enumerate(max_fpts_lineups):
             out_file.write(f"\nLineup #{i} ")
-            write_lineup(lineup["lineup"], args.projection_source, out_file)
+            write_lineup(lineup["lineup"], args.model, out_file)
 
     return 0
 
